@@ -36,6 +36,7 @@ class LocalProvider:
     platform_map: ClassVar[dict[str, str | int]] = {}
     is_identifier_only: ClassVar[bool] = False
     is_offline: ClassVar[bool] = True
+    health_url: ClassVar[str | None] = None
 
     def __init__(self, db: Database) -> None:
         self._db = db

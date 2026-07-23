@@ -7,6 +7,7 @@ SSH profiles, provider credentials, and disk space. Used by the
 
 from __future__ import annotations
 
+import asyncio
 import importlib.metadata
 import os
 import re
@@ -18,7 +19,22 @@ from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
 
+import aiohttp
+
 from multiscraper.config.loader import resolve_env_vars
+from multiscraper.providers.gamefaqs import GameFAQsProvider
+from multiscraper.providers.giantbomb import GiantBombProvider
+from multiscraper.providers.hasheous import HasheousIdentifier
+from multiscraper.providers.igdb import IGDBProvider
+from multiscraper.providers.libretro_thumbnails import LibRetroThumbnailsProvider
+from multiscraper.providers.local import LocalProvider
+from multiscraper.providers.mobygames import MobyGamesProvider
+from multiscraper.providers.openvgdb import OpenVGDBProvider
+from multiscraper.providers.rawg import RAWGProvider
+from multiscraper.providers.registry import ProviderRegistry
+from multiscraper.providers.retroachievements import RetroAchievementsProvider
+from multiscraper.providers.screenscraper import ScreenScraperProvider
+from multiscraper.providers.thegamesdb import TheGamesDBProvider
 from multiscraper.transport.ssh import SshTransport
 
 if TYPE_CHECKING:
@@ -433,6 +449,120 @@ class Doctor:
             self.check_ssh_profile(name, profile)
             for name, profile in profiles.items()
         ]
+
+    def _build_provider_registry(self) -> ProviderRegistry:
+        """Build a ProviderRegistry with all known provider classes pre-registered."""
+        reg = ProviderRegistry()
+        for cls in (
+            ScreenScraperProvider,
+            IGDBProvider,
+            RAWGProvider,
+            MobyGamesProvider,
+            GiantBombProvider,
+            RetroAchievementsProvider,
+            TheGamesDBProvider,
+            LibRetroThumbnailsProvider,
+            OpenVGDBProvider,
+            GameFAQsProvider,
+            HasheousIdentifier,
+            LocalProvider,
+        ):
+            reg.register_class(cls)
+        return reg
+
+    def check_provider_endpoints(
+        self, providers: list[ProviderEntry]
+    ) -> list[CheckResult]:
+        """HEAD-check each enabled provider's health_url."""
+        results: list[CheckResult] = []
+        reg = self._build_provider_registry()
+        targets: list[tuple[str, str]] = []
+        for entry in providers:
+            if not entry.enabled:
+                continue
+            cls = reg.get_class(entry.id)
+            if cls is None:
+                continue
+            url = getattr(cls, "health_url", None)
+            if not url:
+                results.append(
+                    CheckResult(
+                        name=f"endpoint[{entry.id}]",
+                        status=CheckStatus.OK,
+                        message="skipped (local)",
+                    )
+                )
+                continue
+            targets.append((entry.id, url))
+
+        async def _probe_all() -> list[tuple[str, CheckStatus, str]]:
+            outcomes: list[tuple[str, CheckStatus, str]] = []
+            timeout = aiohttp.ClientTimeout(total=5)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                for pid, url in targets:
+                    try:
+                        async with session.head(url) as resp:
+                            status = resp.status
+                    except (aiohttp.ClientError, TimeoutError) as exc:
+                        outcomes.append((pid, CheckStatus.FAIL, f"{exc}"))
+                        continue
+                    if 200 <= status < 400:
+                        outcomes.append((pid, CheckStatus.OK, f"HTTP {status}"))
+                    elif 400 <= status < 500:
+                        outcomes.append((pid, CheckStatus.WARN, f"HTTP {status}"))
+                    else:
+                        outcomes.append((pid, CheckStatus.FAIL, f"HTTP {status}"))
+            return outcomes
+
+        if targets:
+            for pid, status, msg in asyncio.run(_probe_all()):
+                results.append(
+                    CheckResult(
+                        name=f"endpoint[{pid}]",
+                        status=status,
+                        message=msg,
+                    )
+                )
+        return results
+
+    def check_provider_loadable(
+        self, providers: list[ProviderEntry]
+    ) -> list[CheckResult]:
+        """Verify each enabled provider's class can be instantiated."""
+        reg = self._build_provider_registry()
+        results: list[CheckResult] = []
+        for entry in providers:
+            if not entry.enabled:
+                continue
+            name = f"loadable[{entry.id}]"
+            if reg.get_class(entry.id) is None:
+                results.append(
+                    CheckResult(
+                        name=name,
+                        status=CheckStatus.FAIL,
+                        message="provider class not registered",
+                    )
+                )
+                continue
+            try:
+                reg.instantiate(entry.id)
+            except Exception as exc:
+                results.append(
+                    CheckResult(
+                        name=name,
+                        status=CheckStatus.FAIL,
+                        message=f"instantiation failed: {exc}",
+                    )
+                )
+                continue
+            results.append(
+                CheckResult(
+                    name=name,
+                    status=CheckStatus.OK,
+                    message="instantiated",
+                )
+            )
+        return results
 
 
 def run_doctor(ssh_profile: str | None = None) -> DoctorReport:

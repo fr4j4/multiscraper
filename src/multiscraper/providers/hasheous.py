@@ -25,6 +25,7 @@ class HasheousIdentifier:
 
     name: ClassVar[str] = "hasheous"
     is_identifier_only: ClassVar[bool] = True
+    health_url: ClassVar[str | None] = "https://hasheous.org/"
 
     def __init__(self) -> None:
         self._session: aiohttp.ClientSession | None = None

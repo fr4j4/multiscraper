@@ -6,7 +6,9 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from aioresponses import aioresponses
 
+from multiscraper.config.models import ProviderEntry
 from multiscraper.doctor import CheckStatus, Doctor, DoctorReport, run_doctor
 
 
@@ -148,7 +150,6 @@ def test_check_provider_credentials_missing(monkeypatch):
     """When a provider's required env var is not set, check should FAIL."""
     monkeypatch.delenv("SCREENSCRAPER_DEV_ID", raising=False)
     monkeypatch.delenv("SCREENSCRAPER_DEV_PASSWORD", raising=False)
-    from multiscraper.config.models import ProviderEntry
 
     entry = ProviderEntry(
         id="screenscraper",
@@ -164,7 +165,6 @@ def test_check_provider_credentials_missing(monkeypatch):
 def test_check_provider_credentials_ok(monkeypatch):
     monkeypatch.setenv("SCREENSCRAPER_DEV_ID", "abc")
     monkeypatch.setenv("SCREENSCRAPER_DEV_PASSWORD", "xyz")
-    from multiscraper.config.models import ProviderEntry
 
     entry = ProviderEntry(
         id="screenscraper",
@@ -178,7 +178,6 @@ def test_check_provider_credentials_ok(monkeypatch):
 
 def test_check_provider_credentials_disabled_provider_skipped(monkeypatch):
     monkeypatch.delenv("SCREENSCRAPER_DEV_ID", raising=False)
-    from multiscraper.config.models import ProviderEntry
 
     entry = ProviderEntry(
         id="screenscraper",
@@ -418,3 +417,80 @@ def test_check_output_paths_none():
     doctor = Doctor()
     results = doctor.check_output_paths(csv_path=None, gamelist_dir=None)
     assert results == []
+
+
+def test_check_provider_endpoints_all_ok():
+    from multiscraper.providers.registry import ProviderRegistry
+    from multiscraper.providers.screenscraper import ScreenScraperProvider
+
+    reg = ProviderRegistry()
+    reg.register_class(ScreenScraperProvider)
+
+    entry = ProviderEntry(
+        id="screenscraper",
+        enabled=True,
+        config={},
+    )
+
+    with aioresponses() as m:
+        m.head(ScreenScraperProvider.health_url, status=200)
+        results = Doctor().check_provider_endpoints([entry])
+
+    assert len(results) == 1
+    assert results[0].name == "endpoint[screenscraper]"
+    assert results[0].status == CheckStatus.OK
+
+
+def test_check_provider_endpoints_one_down():
+    from multiscraper.providers.registry import ProviderRegistry
+    from multiscraper.providers.screenscraper import ScreenScraperProvider
+
+    reg = ProviderRegistry()
+    reg.register_class(ScreenScraperProvider)
+
+    entry = ProviderEntry(
+        id="screenscraper",
+        enabled=True,
+        config={},
+    )
+
+    with aioresponses() as m:
+        m.head(ScreenScraperProvider.health_url, status=500)
+        results = Doctor().check_provider_endpoints([entry])
+
+    assert len(results) == 1
+    assert results[0].name == "endpoint[screenscraper]"
+    assert results[0].status == CheckStatus.FAIL
+
+
+def test_check_provider_loadable_known():
+    from multiscraper.providers.registry import ProviderRegistry
+    from multiscraper.providers.screenscraper import ScreenScraperProvider
+
+    reg = ProviderRegistry()
+    reg.register_class(ScreenScraperProvider)
+
+    entry = ProviderEntry(
+        id="screenscraper",
+        enabled=True,
+        config={"devid": "x", "devpassword": "y"},
+    )
+
+    results = Doctor().check_provider_loadable([entry])
+    assert len(results) == 1
+    assert results[0].name == "loadable[screenscraper]"
+    assert results[0].status == CheckStatus.OK
+
+
+def test_check_provider_loadable_unknown():
+    entry = ProviderEntry(
+        id="no_such",
+        enabled=True,
+        config={},
+    )
+
+    results = Doctor().check_provider_loadable([entry])
+    assert len(results) == 1
+    assert results[0].name == "loadable[no_such]"
+    assert results[0].status == CheckStatus.FAIL
+    assert "not registered" in results[0].message

@@ -26,6 +26,7 @@ class Provider(Protocol):
     platform_map: dict[str, str | int]
     is_identifier_only: bool
     is_offline: bool
+    health_url: str | None
 
     async def setup(self, config: dict[str, object]) -> None: ...
     async def close(self) -> None: ...

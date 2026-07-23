@@ -37,6 +37,7 @@ class MobyGamesProvider:
     platform_map: ClassVar[dict[str, str | int]] = _PLATFORM_MAP  # type: ignore[assignment]
     is_identifier_only: ClassVar[bool] = False
     is_offline: ClassVar[bool] = False
+    health_url: ClassVar[str | None] = "https://api.mobygames.com/v1/"
 
     def __init__(self) -> None:
         self._api_key: str = ""

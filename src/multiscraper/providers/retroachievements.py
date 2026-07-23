@@ -52,6 +52,7 @@ class RetroAchievementsProvider:
     platform_map: ClassVar[dict[str, str | int]] = _PLATFORM_MAP  # type: ignore[assignment]
     is_identifier_only: ClassVar[bool] = False
     is_offline: ClassVar[bool] = False
+    health_url: ClassVar[str | None] = "https://retroachievements.org/dorequest.php"
 
     def __init__(self) -> None:
         self._username: str = ""
