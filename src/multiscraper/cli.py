@@ -8,6 +8,7 @@ from pathlib import Path
 import click
 
 from multiscraper import __version__
+from multiscraper.doctor import CheckStatus, DoctorReport, run_doctor
 
 
 @click.group()
@@ -178,19 +179,26 @@ def override_list(system: str | None) -> None:
 @click.option("--ssh", "ssh_profile", default=None, help="SSH profile name from systems.yaml")
 def doctor(ssh_profile: str | None) -> None:
     """Run diagnostics: check SSH, providers, credentials, disk space."""
-    from multiscraper.doctor import CheckStatus, run_doctor
-
     click.echo("Running diagnostics...")
-    report = run_doctor(ssh_profile=ssh_profile)
+    report: DoctorReport = run_doctor(ssh_profile=ssh_profile)
+    ok = warn = fail = 0
     for check in report.checks:
         marker = {
             CheckStatus.OK: "OK",
             CheckStatus.WARN: "WARN",
             CheckStatus.FAIL: "FAIL",
         }[check.status]
+        if check.status == CheckStatus.OK:
+            ok += 1
+        elif check.status == CheckStatus.WARN:
+            warn += 1
+        else:
+            fail += 1
         click.echo(f"  [{marker}] {check.name}: {check.message}")
-    if report.has_failures:
-        click.echo("Some checks failed.", err=True)
+    click.echo(f"Summary: {ok} OK, {warn} WARN, {fail} FAIL")
+    if fail:
+        sys.exit(2)
+    if warn:
         sys.exit(1)
     click.echo("All checks passed.")
 
