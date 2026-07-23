@@ -193,6 +193,24 @@ class Database:
         )
         await self._conn.commit()
 
+    async def get_override_by_cache_key(self, cache_key: str) -> dict[str, Any] | None:
+        assert self._conn is not None
+        cursor = await self._conn.execute(
+            "SELECT cache_key, name, desc, image_path, metadata_json, "
+            "media_paths_json, confidence, note "
+            "FROM source_overrides WHERE cache_key = ?",
+            (cache_key,),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        if row is None:
+            return None
+        return {
+            "cache_key": row[0], "name": row[1], "desc": row[2],
+            "image_path": row[3], "metadata_json": row[4],
+            "media_paths_json": row[5], "confidence": row[6], "note": row[7],
+        }
+
     async def get_media_for_rom(self, rom_id: int) -> list[dict[str, Any]]:
         assert self._conn is not None
         cursor = await self._conn.execute(

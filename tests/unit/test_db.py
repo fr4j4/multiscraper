@@ -137,3 +137,36 @@ async def test_insert_media(db: Database):
     assert len(media) == 1
     assert media[0]["type"] == "image"
     assert media[0]["bytes"] == 50000
+
+
+@pytest.mark.asyncio
+async def test_get_override_by_cache_key(db: Database):
+    """get_override_by_cache_key returns the row or None."""
+    from datetime import UTC, datetime
+    now = datetime.now(tz=UTC).isoformat()
+    media_paths = '{"image": "/srv/media/snes/foo.png", "logo": "/srv/media/snes/foo.svg"}'
+    assert db._conn is not None
+    await db._conn.execute(
+        "INSERT INTO source_overrides (cache_key, name, desc, image_path, "
+        "metadata_json, media_paths_json, confidence, note, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            "ck-1", "Manual Title", "Manual description",
+            "/srv/media/snes/foo.png", '{"genre": "Action"}',
+            media_paths, 1.0, "test override", now,
+        ),
+    )
+    await db._conn.commit()
+
+    row = await db.get_override_by_cache_key("ck-1")
+    assert row is not None
+    assert row["cache_key"] == "ck-1"
+    assert row["name"] == "Manual Title"
+    assert row["desc"] == "Manual description"
+    assert row["image_path"] == "/srv/media/snes/foo.png"
+    assert row["media_paths_json"] == media_paths
+    assert row["confidence"] == 1.0
+    assert row["note"] == "test override"
+
+    missing = await db.get_override_by_cache_key("does-not-exist")
+    assert missing is None
