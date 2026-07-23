@@ -121,6 +121,7 @@ def test_check_es_systems_found(tmp_path, monkeypatch):
     result = doctor.check_es_systems(override_path=cfg)
     assert result.status == CheckStatus.OK
     assert "1" in result.message
+    assert "snes" in result.message
 
 
 def test_check_disk_space_ok(tmp_path, monkeypatch):
@@ -222,3 +223,198 @@ def test_run_doctor_with_ssh_profile(tmp_path, monkeypatch):
         report = run_doctor(ssh_profile="arcade")
         assert any(c.name.startswith("ssh[arcade]") for c in report.checks)
         assert mock.called
+
+
+def test_check_es_systems_found_truncates(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    systems_xml = "<systemList>"
+    names = [f"sys{i}" for i in range(15)]
+    for name in names:
+        systems_xml += (
+            f"<system><name>{name}</name><fullname>{name}</fullname>"
+            f"<path>/roms/{name}</path></system>"
+        )
+    systems_xml += "</systemList>"
+    cfg = tmp_path / "es_systems.cfg"
+    cfg.write_text(f'<?xml version="1.0"?>\n{systems_xml}')
+    monkeypatch.setattr("multiscraper.doctor.Path.home", lambda: tmp_path)
+    doctor = Doctor()
+    result = doctor.check_es_systems(override_path=cfg)
+    assert result.status == CheckStatus.OK
+    assert "15" in result.message
+    assert "..." in result.message
+
+
+def test_check_dependencies_all_present(monkeypatch):
+    import importlib.metadata as md
+
+    real_version = md.version
+
+    def fake_version(name: str) -> str:
+        return {
+            "asyncssh": "2.14.0",
+            "aiohttp": "3.9.0",
+            "lxml": "5.0.0",
+            "pydantic": "2.5.0",
+            "click": "8.1.0",
+            "rich": "13.0.0",
+            "aiosqlite": "0.19.0",
+            "PyYAML": "6.0.0",
+        }.get(name, real_version(name))
+
+    monkeypatch.setattr("importlib.metadata.version", fake_version)
+    doctor = Doctor()
+    result = doctor.check_dependencies()
+    assert result.status == CheckStatus.OK
+    assert "all" in result.message.lower()
+    assert "8" in result.message
+
+
+def test_check_dependencies_missing_package(monkeypatch):
+    import importlib.metadata as md
+
+    real_version = md.version
+
+    def fake_version(name: str) -> str:
+        if name == "asyncssh":
+            return "2.0.0"
+        return {
+            "asyncssh": "2.14.0",
+            "aiohttp": "3.9.0",
+            "lxml": "5.0.0",
+            "pydantic": "2.5.0",
+            "click": "8.1.0",
+            "rich": "13.0.0",
+            "aiosqlite": "0.19.0",
+            "PyYAML": "6.0.0",
+        }.get(name, real_version(name))
+
+    monkeypatch.setattr("importlib.metadata.version", fake_version)
+    doctor = Doctor()
+    result = doctor.check_dependencies()
+    assert result.status == CheckStatus.FAIL
+    assert "asyncssh" in result.message
+
+
+def test_check_cache_db_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr("multiscraper.doctor.Path.home", lambda: tmp_path)
+    doctor = Doctor()
+    result = doctor.check_cache_db()
+    assert result.status == CheckStatus.WARN
+    assert "not found" in result.message.lower() or "missing" in result.message.lower()
+
+
+def test_check_cache_db_present_healthy(tmp_path, monkeypatch):
+    import sqlite3
+
+    ms_dir = tmp_path / ".multiscraper"
+    ms_dir.mkdir()
+    db_path = ms_dir / "cache.db"
+    conn = sqlite3.connect(db_path)
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "CREATE TABLE runs (id TEXT PRIMARY KEY, started_at TEXT, "
+            "finished_at TEXT, status TEXT, config_json TEXT, totals_json TEXT)"
+        )
+        cur.execute(
+            "CREATE TABLE roms (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "cache_key TEXT, system TEXT, rel_path TEXT, raw_name TEXT, "
+            "normalized_name TEXT, size INTEGER, mtime INTEGER)"
+        )
+        cur.execute("INSERT INTO runs VALUES ('r1', '2024-01-01', NULL, 'ok', '{}', '{}')")
+        cur.execute(
+            "INSERT INTO roms (cache_key, system, rel_path, raw_name, "
+            "normalized_name, size, mtime) "
+            "VALUES ('k1', 'snes', 'a.sfc', 'a', 'a', 1, 0)"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    monkeypatch.setattr("multiscraper.doctor.Path.home", lambda: tmp_path)
+    doctor = Doctor()
+    result = doctor.check_cache_db()
+    assert result.status == CheckStatus.OK
+    assert "runs: 1" in result.message
+    assert "roms: 1" in result.message
+    assert "integrity: OK" in result.message
+
+
+def test_check_cache_db_corrupt(tmp_path, monkeypatch):
+    ms_dir = tmp_path / ".multiscraper"
+    ms_dir.mkdir()
+    db_path = ms_dir / "cache.db"
+    db_path.write_text("not a sqlite database at all" * 100)
+    monkeypatch.setattr("multiscraper.doctor.Path.home", lambda: tmp_path)
+    doctor = Doctor()
+    result = doctor.check_cache_db()
+    assert result.status == CheckStatus.FAIL
+
+
+def test_check_media_writable_ok(tmp_path, monkeypatch):
+    monkeypatch.setattr("multiscraper.doctor.Path.home", lambda: tmp_path)
+    doctor = Doctor()
+    result = doctor.check_media_writable()
+    assert result.status == CheckStatus.OK
+
+
+def test_check_media_writable_permission_denied(tmp_path, monkeypatch):
+    media_root = tmp_path / "multiscraper_data"
+    media_root.mkdir()
+    media_root.chmod(0o555)
+    monkeypatch.setattr("multiscraper.doctor.Path.home", lambda: tmp_path)
+    doctor = Doctor()
+    try:
+        result = doctor.check_media_writable()
+        assert result.status == CheckStatus.FAIL
+    finally:
+        media_root.chmod(0o755)
+
+
+def test_check_logs_writable_ok(tmp_path, monkeypatch):
+    monkeypatch.setattr("multiscraper.doctor.Path.home", lambda: tmp_path)
+    doctor = Doctor()
+    result = doctor.check_logs_writable()
+    assert result.status == CheckStatus.OK
+
+
+def test_check_logs_writable_permission_denied(tmp_path, monkeypatch):
+    ms_dir = tmp_path / ".multiscraper"
+    ms_dir.mkdir()
+    ms_dir.chmod(0o555)
+    monkeypatch.setattr("multiscraper.doctor.Path.home", lambda: tmp_path)
+    doctor = Doctor()
+    try:
+        result = doctor.check_logs_writable()
+        assert result.status == CheckStatus.FAIL
+    finally:
+        ms_dir.chmod(0o755)
+
+
+def test_check_output_paths_existing(tmp_path):
+    csv_path = tmp_path / "out.csv"
+    csv_path.write_text("a,b\n1,2\n")
+    gamelist_dir = tmp_path / "gamelists"
+    gamelist_dir.mkdir()
+    doctor = Doctor()
+    results = doctor.check_output_paths(csv_path=csv_path, gamelist_dir=gamelist_dir)
+    assert len(results) == 2
+    for r in results:
+        assert r.status == CheckStatus.WARN
+        assert r.message != ""
+
+
+def test_check_output_paths_missing(tmp_path):
+    csv_path = tmp_path / "missing.csv"
+    gamelist_dir = tmp_path / "missing_gamelists"
+    doctor = Doctor()
+    results = doctor.check_output_paths(csv_path=csv_path, gamelist_dir=gamelist_dir)
+    assert len(results) == 2
+    for r in results:
+        assert r.status == CheckStatus.OK
+
+
+def test_check_output_paths_none():
+    doctor = Doctor()
+    results = doctor.check_output_paths(csv_path=None, gamelist_dir=None)
+    assert results == []

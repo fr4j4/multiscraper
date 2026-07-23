@@ -7,13 +7,16 @@ SSH profiles, provider credentials, and disk space. Used by the
 
 from __future__ import annotations
 
+import importlib.metadata
+import os
 import re
 import shutil
+import sqlite3
 import sys
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 from multiscraper.config.loader import resolve_env_vars
 from multiscraper.transport.ssh import SshTransport
@@ -82,6 +85,17 @@ class Doctor:
 
     MIN_PYTHON = (3, 11)
     DISK_WARN_THRESHOLD_BYTES = 500 * 1024 * 1024
+
+    REQUIRED_DEPS: ClassVar[dict[str, str]] = {
+        "asyncssh": "2.14.0",
+        "aiohttp": "3.9.0",
+        "lxml": "5.0.0",
+        "pydantic": "2.5.0",
+        "click": "8.1.0",
+        "rich": "13.0.0",
+        "aiosqlite": "0.19.0",
+        "PyYAML": "6.0.0",
+    }
 
     def check_python_version(self) -> CheckResult:
         v = sys.version_info
@@ -155,10 +169,14 @@ class Doctor:
                         status=CheckStatus.WARN,
                         message=f"found {path} but failed to parse: {exc}",
                     )
+                names = [s.name for s in systems]
+                display = ", ".join(names[:10])
+                if len(names) > 10:
+                    display += ", ..."
                 return CheckResult(
                     name="es_systems",
                     status=CheckStatus.OK,
-                    message=f"{path} — {len(systems)} system(s)",
+                    message=f"{path} — {len(names)} systems: {display}",
                 )
 
         return CheckResult(
@@ -166,6 +184,128 @@ class Doctor:
             status=CheckStatus.WARN,
             message="not found (no auto-discovery candidates)",
         )
+
+    def _check_writable(self, path: Path, name: str) -> CheckResult:
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+            probe = path / "multiscraper_doctor.tmp"
+            probe.write_text("ok", encoding="utf-8")
+            probe.read_text(encoding="utf-8")
+            probe.unlink()
+        except Exception as exc:
+            return CheckResult(
+                name=name,
+                status=CheckStatus.FAIL,
+                message=f"{path} not writable: {exc}",
+            )
+        return CheckResult(
+            name=name,
+            status=CheckStatus.OK,
+            message=f"{path} writable",
+        )
+
+    def check_media_writable(self) -> CheckResult:
+        path = Path.home() / "multiscraper_data" / "media"
+        return self._check_writable(path, "media_writable")
+
+    def check_logs_writable(self) -> CheckResult:
+        path = Path.home() / ".multiscraper" / "logs"
+        return self._check_writable(path, "logs_writable")
+
+    def check_dependencies(self) -> CheckResult:
+        def _parse(v: str) -> tuple[int, ...]:
+            return tuple(int(p) for p in v.split(".") if p.isdigit())
+
+        missing: list[str] = []
+        for pkg, minimum in self.REQUIRED_DEPS.items():
+            try:
+                installed = importlib.metadata.version(pkg)
+            except importlib.metadata.PackageNotFoundError:
+                missing.append(f"{pkg}: not installed")
+                continue
+            if _parse(installed) < _parse(minimum):
+                missing.append(f"{pkg}: {installed} found, need >= {minimum}")
+        if missing:
+            return CheckResult(
+                name="dependencies",
+                status=CheckStatus.FAIL,
+                message="; ".join(missing),
+            )
+        return CheckResult(
+            name="dependencies",
+            status=CheckStatus.OK,
+            message=f"all {len(self.REQUIRED_DEPS)} packages present",
+        )
+
+    def check_cache_db(self) -> CheckResult:
+        db_path = Path.home() / ".multiscraper" / "cache.db"
+        if not db_path.exists():
+            return CheckResult(
+                name="cache_db",
+                status=CheckStatus.WARN,
+                message=f"{db_path} not found (will be created on first run)",
+            )
+        size_mb = db_path.stat().st_size / (1024 * 1024)
+        try:
+            with sqlite3.connect(str(db_path)) as conn:
+                cur = conn.cursor()
+                cur.execute("PRAGMA integrity_check")
+                integrity_row = cur.fetchone()
+                integrity = integrity_row[0] if integrity_row else "?"
+                cur.execute("SELECT COUNT(*) FROM runs")
+                runs_count = cur.fetchone()[0]
+                cur.execute("SELECT COUNT(*) FROM roms")
+                roms_count = cur.fetchone()[0]
+        except sqlite3.DatabaseError as exc:
+            return CheckResult(
+                name="cache_db",
+                status=CheckStatus.FAIL,
+                message=f"integrity check failed: {exc}",
+            )
+        if integrity != "ok":
+            return CheckResult(
+                name="cache_db",
+                status=CheckStatus.FAIL,
+                message=f"integrity: {integrity}, runs: {runs_count}, roms: {roms_count}",
+            )
+        return CheckResult(
+            name="cache_db",
+            status=CheckStatus.OK,
+            message=(
+                f"runs: {runs_count}, roms: {roms_count}, "
+                f"integrity: OK, size: {size_mb:.1f} MB"
+            ),
+        )
+
+    def check_output_paths(
+        self,
+        csv_path: Path | None,
+        gamelist_dir: Path | None,
+    ) -> list[CheckResult]:
+        results: list[CheckResult] = []
+        for label, path in (
+            ("output_csv", csv_path),
+            ("output_gamelist_dir", gamelist_dir),
+        ):
+            if path is None:
+                continue
+            if path.exists():
+                results.append(
+                    CheckResult(
+                        name=label,
+                        status=CheckStatus.WARN,
+                        message=f"{path} already exists (will be overwritten)",
+                    )
+                )
+            else:
+                results.append(
+                    CheckResult(
+                        name=label,
+                        status=CheckStatus.OK,
+                        message=f"{path} does not exist",
+                    )
+                )
+        return results
 
     def check_disk_space(self, path: Path | None = None) -> CheckResult:
         target = path or Path.home() / "multiscraper_data" / "media"
@@ -197,8 +337,6 @@ class Doctor:
     def check_provider_credentials(
         self, providers: list[ProviderEntry]
     ) -> CheckResult:
-        import os
-
         missing: list[str] = []
         for entry in providers:
             if not entry.enabled:
