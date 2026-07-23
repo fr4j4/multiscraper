@@ -177,10 +177,22 @@ def override_list(system: str | None) -> None:
 
 @main.command()
 @click.option("--ssh", "ssh_profile", default=None, help="SSH profile name from systems.yaml")
-def doctor(ssh_profile: str | None) -> None:
+@click.option(
+    "--systems",
+    default=None,
+    help="Comma-separated list of systems to validate config for",
+)
+def doctor(ssh_profile: str | None, systems: str | None) -> None:
     """Run diagnostics: check SSH, providers, credentials, disk space."""
     click.echo("Running diagnostics...")
-    report: DoctorReport = run_doctor(ssh_profile=ssh_profile)
+    systems_list = (
+        [s.strip() for s in systems.split(",") if s.strip()]
+        if systems
+        else None
+    )
+    report: DoctorReport = run_doctor(
+        ssh_profile=ssh_profile, systems=systems_list
+    )
     ok = warn = fail = 0
     for check in report.checks:
         marker = {

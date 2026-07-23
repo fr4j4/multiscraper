@@ -93,3 +93,15 @@ def test_cli_doctor_summary_printed():
     assert "1 OK" in result.output
     assert "1 WARN" in result.output
     assert "1 FAIL" in result.output
+
+
+def test_cli_doctor_systems_flag():
+    runner = CliRunner()
+    report = _make_report(
+        CheckResult(name="python", status=CheckStatus.OK, message="Python 3.12"),
+        CheckResult(name="system[snes]", status=CheckStatus.OK, message="ok"),
+    )
+    with patch("multiscraper.cli.run_doctor", return_value=report) as mock:
+        result = runner.invoke(main, ["doctor", "--systems", "snes"])
+    assert mock.called
+    assert "system[snes]" in result.output
