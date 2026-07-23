@@ -1,0 +1,80 @@
+[project]
+name = "multiscraper"
+version = "0.1.0"
+description = "Parallel, multi-source scraper for retro gaming frontends"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.11"
+authors = [{name = "fr4j4"}]
+keywords = ["emulationstation", "scraper", "retro", "gaming", "roms"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Games/Entertainment",
+    "Topic :: Multimedia :: Graphics",
+]
+
+dependencies = [
+    "aiohttp>=3.9",
+    "asyncssh>=2.13",
+    "pydantic>=2.5",
+    "click>=8.1",
+    "rich>=13.6",
+    "lxml>=5.0",
+    "PyYAML>=6.0",
+    "aiosqlite>=0.19",
+    "aiofiles>=23.2",
+    "charset-normalizer>=3.3",
+    "python-ulid>=2.2",
+    "Pillow>=10.0",
+    "python-dateutil>=2.8",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=4.1",
+    "vcrpy>=5.1",
+    "aioresponses>=0.7",
+    "mypy>=1.8",
+    "ruff>=0.3",
+    "types-PyYAML",
+    "types-aiofiles",
+    "freezegun>=1.4",
+]
+
+[project.scripts]
+multiscraper = "multiscraper.cli:main"
+
+[project.entry-points."multiscraper.providers"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/multiscraper"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+markers = [
+    "network: requires internet access",
+    "slow: long-running tests",
+]
