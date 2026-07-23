@@ -19,3 +19,4 @@ htmlcov/
 .pytest_cache/
 config/sources.yaml
 config/systems.yaml
+config/config.yaml
