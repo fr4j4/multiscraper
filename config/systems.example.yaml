@@ -1,42 +1,27 @@
-# Example systems configuration for multiscraper.
-# If es_systems.cfg exists, it takes precedence; this file overrides.
+# systems.yaml.example — declarative list of emulated systems.
 #
-# Each system requires:
-#   - extensions: REQUIRED. Use ["*"] for wildcard, or a list like ["smc", "sfc"].
-#                 Leading dot is optional: "gba" and ".gba" are equivalent.
-#   - roms_root:  transport is inferred from the scheme.
-#                 ssh://<profile>/path  or  ssh://<user>@<host>:<port>/path  for remote
-#                 /absolute/path, ~/relative/path, ./relative, ../parent  for local
-
-roms_root: ssh://arcade             # default if roms_root not set per system
-media_root: ~/multiscraper_data/media  # where to save downloaded media
-
-# SSH profiles (referenced by ssh://<profile>/... in roms_root)
-ssh_profiles:
-  arcade:
-    host: 192.168.1.28
-    port: 22
-    user: arcade
-    # password: ${env:ARCADE_PASS}
-    key_file: ~/.ssh/id_ed25519
-    known_hosts: ~/.ssh/known_hosts
-    # auto_trust: true
+# Systems are TRANSPORT-AGNOSTIC. They declare a `relative_path` or `full_path`
+# that is resolved against `current_transport` in `config.yaml`.
+#
+# Rules:
+#   - Each system has exactly ONE of `relative_path` or `full_path` (not both, not neither).
+#   - `relative_path` is concatenated with the transport's `base_path`.
+#   - `full_path` is used as-is (ignores `base_path`).
+#   - `extensions` is REQUIRED. Use ["*"] for wildcard, or a list like [gba, gb].
+#     Leading dot is optional: "gba" and ".gba" are equivalent.
+#
+# If es_systems.cfg is present (auto-discovered), it can provide defaults that
+# are overridden by entries in this file.
 
 systems:
-  # Case 1: explicit extension list (dots optional)
   - name: snes
-    roms_root: ssh://arcade/home/arcade/ROMs/snes
-    extensions: [smc, sfc]
+    relative_path: /snes
+    extensions: [sfc, smc]
 
-  # Case 2: explicit wildcard
   - name: gba
-    roms_root: ssh://arcade/home/arcade/ROMs/gba
-    extensions: ["*"]
+    relative_path: /gba
+    extensions: [gba]
 
-  # Case 3: local path
-  - name: nes
-    roms_root: ~/ROMs/nes
-    extensions: [nes]
-
-# Override es_systems.cfg path (auto-discovered by default)
-# es_systems_path: ~/.emulationstation/es_systems.cfg
+  - name: psx
+    full_path: /mnt/external/roms/psx
+    extensions: [cue, bin, iso]

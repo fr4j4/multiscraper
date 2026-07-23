@@ -1,0 +1,55 @@
+# config.yaml.example — infrastructure, transports, and behavior
+#
+# This file is READ by `multiscraper doctor`, `multiscraper validate-config`,
+# and the orchestrator. It declares HOW to access ROMs and runtime behavior.
+#
+# Required:
+#   - `transports`: a non-empty list of named transports (ssh or local).
+#   - `current_transport`: the name of the transport that is currently active.
+#
+# Optional:
+#   - `defaults`: media_root and cache_db locations.
+#   - `orchestrator`: tunables for the run (workers, batch_size, etc.).
+
+transports:
+  # SSH transport example
+  - name: arcade
+    kind: ssh
+    host: 192.168.1.28
+    port: 22
+    user: arcade
+    password: ${env:ARCADE_PASS}
+    auto_trust: true
+    base_path: /home/arcade/ROMs
+
+  # Local transport example
+  - name: workstation
+    kind: local
+    base_path: /home/user/roms
+
+  # Another SSH transport with key auth
+  - name: nas
+    kind: ssh
+    host: 192.168.0.50
+    user: multiscraper
+    key_file: ~/.ssh/id_ed25519
+    base_path: /mnt/nas/roms
+
+# The single transport that is currently active.
+# All systems use this transport.
+current_transport: arcade
+
+defaults:
+  media_root: ~/multiscraper_data/media
+  cache_db: ~/.multiscraper/cache.db
+
+orchestrator:
+  workers: 8
+  media_concurrency: 4
+  batch_size: 50
+  max_job_attempts: 3
+  worker_failure_window_sec: 60
+  worker_failure_threshold: 3
+  shutdown_drain_timeout_sec: 180
+  csv_flush_every: 50
+  progress_interval_sec: 0.5

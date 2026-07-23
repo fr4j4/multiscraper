@@ -21,7 +21,6 @@ from typing import TYPE_CHECKING, ClassVar
 
 import aiohttp
 
-from multiscraper.config.loader import resolve_env_vars
 from multiscraper.providers.gamefaqs import GameFAQsProvider
 from multiscraper.providers.giantbomb import GiantBombProvider
 from multiscraper.providers.hasheous import HasheousIdentifier
@@ -35,10 +34,15 @@ from multiscraper.providers.registry import ProviderRegistry
 from multiscraper.providers.retroachievements import RetroAchievementsProvider
 from multiscraper.providers.screenscraper import ScreenScraperProvider
 from multiscraper.providers.thegamesdb import TheGamesDBProvider
-from multiscraper.transport.ssh import SshTransport
 
 if TYPE_CHECKING:
-    from multiscraper.config.models import ProviderEntry
+    from multiscraper.config.models import (
+        ProviderEntry,
+        System,
+        SystemsConfig,
+        Transport,
+        TransportsConfig,
+    )
 
 
 class CheckStatus(StrEnum):
@@ -153,6 +157,8 @@ class Doctor:
     def check_systems_config(
         self, config_path: Path | None = None
     ) -> CheckResult:
+        from multiscraper.config.loader import load_systems_yaml
+
         path = config_path or Path("config/systems.yaml")
         if not path.exists():
             return CheckResult(
@@ -160,16 +166,48 @@ class Doctor:
                 status=CheckStatus.WARN,
                 message=f"{path} not found (will auto-discover es_systems.cfg)",
             )
+        try:
+            load_systems_yaml(path)
+        except Exception as exc:
+            return CheckResult(
+                name="systems_config",
+                status=CheckStatus.FAIL,
+                message=f"invalid: {exc}",
+            )
         return CheckResult(
             name="systems_config",
             status=CheckStatus.OK,
             message=f"{path} present",
         )
 
+    def check_transports_config(
+        self, config_path: Path | None = None
+    ) -> CheckResult:
+        from multiscraper.config.loader import load_config_yaml
+
+        path = config_path or Path("config/config.yaml")
+        if not path.exists():
+            return CheckResult(
+                name="transports_config",
+                status=CheckStatus.FAIL,
+                message=f"{path} not found",
+            )
+        try:
+            load_config_yaml(path)
+        except Exception as exc:
+            return CheckResult(
+                name="transports_config",
+                status=CheckStatus.FAIL,
+                message=f"invalid: {exc}",
+            )
+        return CheckResult(
+            name="transports_config",
+            status=CheckStatus.OK,
+            message=f"{path} present",
+        )
+
     _SYSTEM_NAME_PATTERN = re.compile(r"^[a-z0-9_]{1,32}$")
     _EXT_PATTERN = re.compile(r"^\.?[a-z0-9]{1,8}$")
-    _ROMS_ROOT_SSH_PATTERN = re.compile(r"^ssh://[\w@.:-]+")
-    _ROMS_ROOT_LOCAL_PATTERN = re.compile(r"^(/[^/].*|~/.*|\./.*|\.\./.*)$")
 
     def _validate_system_name(self, name: str) -> bool:
         return bool(self._SYSTEM_NAME_PATTERN.match(name))
@@ -203,16 +241,71 @@ class Doctor:
         normalized = [self._normalize_extension(str(x)) for x in exts]
         return CheckStatus.OK, f"extensions: {', '.join(normalized)} valid"
 
-    def _validate_roms_root(self, path: object) -> tuple[CheckStatus, str]:
-        if not isinstance(path, str) or not path:
-            return CheckStatus.FAIL, "roms_root: missing"
-        if self._ROMS_ROOT_SSH_PATTERN.match(path):
-            return CheckStatus.OK, "roms_root: ssh:// valid"
-        if self._ROMS_ROOT_LOCAL_PATTERN.match(path):
-            if path.startswith("~"):
-                return CheckStatus.OK, "roms_root: local path with ~"
-            return CheckStatus.OK, "roms_root: local path"
-        return CheckStatus.FAIL, f"roms_root: invalid format '{path}'"
+    def _load_transports_config(
+        self, config_path: Path | None = None
+    ) -> TransportsConfig | None:
+        from multiscraper.config.loader import load_config_yaml
+
+        path = config_path or Path("config/config.yaml")
+        if not path.exists():
+            return None
+        try:
+            return load_config_yaml(path)
+        except Exception:
+            return None
+
+    def _load_systems_config(
+        self, config_path: Path | None = None
+    ) -> SystemsConfig | None:
+        from multiscraper.config.loader import load_systems_yaml
+
+        path = config_path or Path("config/systems.yaml")
+        if not path.exists():
+            return None
+        try:
+            return load_systems_yaml(path)
+        except Exception:
+            return None
+
+    def _load_systems_raw(
+        self, config_path: Path | None = None
+    ) -> list[dict[str, object]]:
+        from typing import cast
+
+        import yaml
+
+        path = config_path or Path("config/systems.yaml")
+        if not path.exists():
+            return []
+        try:
+            raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except Exception:
+            return []
+        if not isinstance(raw, dict):
+            return []
+        systems_obj = raw.get("systems", [])
+        systems_list = cast(list[dict[str, object]], systems_obj) if isinstance(
+            systems_obj, list
+        ) else []
+        return [s for s in systems_list if isinstance(s, dict)]
+
+    def _validate_system_defensively(
+        self, raw_entry: dict[str, object]
+    ) -> tuple[System | None, str | None]:
+        """Try to construct a System model from a raw dict.
+
+        Returns (system, None) on success or (None, error_message) on
+        failure. This is the defensive check called from
+        `check_systems_config_names`; Pydantic normally catches
+        schema problems at load time, but if it slips through, the
+        doctor still surfaces a clear error.
+        """
+        from multiscraper.config.models import System
+
+        try:
+            return System.model_validate(raw_entry), None
+        except Exception as exc:
+            return None, str(exc)
 
     def _load_es_systems_index(
         self,
@@ -232,56 +325,45 @@ class Doctor:
                 return {s.name: (s.path, list(s.extensions)) for s in systems}
         return {}
 
-    def _load_systems_yaml(
-        self, config_path: Path | None = None
-    ) -> dict[str, dict[str, object]]:
-        from typing import cast
-
-        import yaml
-
-        path = config_path or Path("config/systems.yaml")
-        if not path.exists():
-            return {}
-        try:
-            raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
-        if not isinstance(raw, dict):
-            return {}
-        systems_obj = raw.get("systems", [])
-        systems_list = cast(list[dict[str, object]], systems_obj) if isinstance(
-            systems_obj, list
-        ) else []
-        return {
-            str(s.get("name")): s
-            for s in systems_list
-            if isinstance(s, dict) and isinstance(s.get("name"), str)
-        }
-
     def check_systems_config_names(
         self, names: list[str]
     ) -> list[CheckResult]:
         """Validate system configuration for the given system names.
 
         Looks up each name in both es_systems.cfg (auto-discovered) and
-        config/systems.yaml. Sub-checks expressed in a single
-        CheckResult.message: resolvable, source mixing, name format,
-        extensions valid, roms_root format valid. Transport is
-        inferred from `roms_root`, so no per-system `ssh_profile` is
-        consulted.
+        systems.yaml. The path is resolved against the current
+        transport in config.yaml and checked for accessibility.
         """
         results: list[CheckResult] = []
         if not names:
             return results
         es_index = self._load_es_systems_index()
-        yaml_systems = self._load_systems_yaml()
+        systems_cfg = self._load_systems_config()
+        raw_systems = self._load_systems_raw()
+        current_transport: Transport | None = None
+        transports_cfg = self._load_transports_config()
+        if transports_cfg is not None:
+            for t in transports_cfg.transports:
+                if t.name == transports_cfg.current_transport:
+                    current_transport = t
+                    break
+        yaml_systems: dict[str, System] = (
+            {s.name: s for s in systems_cfg.systems}
+            if systems_cfg is not None
+            else {}
+        )
+        yaml_raw_by_name: dict[str, dict[str, object]] = {
+            str(s.get("name")): s
+            for s in raw_systems
+            if isinstance(s.get("name"), str)
+        }
         for raw_name in names:
             name = str(raw_name)
             es_entry = es_index.get(name)
-            yaml_entry = yaml_systems.get(name)
+            yaml_entry: System | None = yaml_systems.get(name)
             parts: list[str] = []
             status = CheckStatus.OK
-            if es_entry is None and yaml_entry is None:
+            if es_entry is None and yaml_entry is None and name not in yaml_raw_by_name:
                 results.append(
                     CheckResult(
                         name=f"system[{name}]",
@@ -293,20 +375,33 @@ class Doctor:
             sources: list[str] = []
             if es_entry is not None:
                 sources.append("es_systems")
-            if yaml_entry is not None:
+            if yaml_entry is not None or name in yaml_raw_by_name:
                 sources.append("systems.yaml")
             parts.append(f"source={'+'.join(sources)}")
-            if es_entry is not None and yaml_entry is None:
+            if es_entry is not None and yaml_entry is None and name not in yaml_raw_by_name:
                 parts.append("no override in systems.yaml")
                 if status == CheckStatus.OK:
                     status = CheckStatus.WARN
             if not self._validate_system_name(name):
                 parts.append(f"name='{name}' (invalid format)")
                 status = CheckStatus.FAIL
+            if name in yaml_raw_by_name and yaml_entry is None:
+                _valid, err = self._validate_system_defensively(yaml_raw_by_name[name])
+                if err is not None:
+                    parts.append(f"schema: {err}")
+                    status = CheckStatus.FAIL
+                    results.append(
+                        CheckResult(
+                            name=f"system[{name}]",
+                            status=status,
+                            message=", ".join(parts),
+                        )
+                    )
+                    continue
             ext_value: object = []
             has_yaml_exts = False
-            if yaml_entry is not None and "extensions" in yaml_entry:
-                ext_value = yaml_entry.get("extensions")
+            if yaml_entry is not None:
+                ext_value = yaml_entry.extensions
                 has_yaml_exts = True
             elif es_entry is not None:
                 ext_value = list(es_entry[1])
@@ -318,14 +413,14 @@ class Doctor:
                 if not ext_value:
                     parts.append("extensions: missing (use [*] or list of extensions)")
                 status = CheckStatus.FAIL
-            roms_root_value: object = None
-            if yaml_entry is not None and "roms_root" in yaml_entry:
-                roms_root_value = yaml_entry.get("roms_root")
-            elif es_entry is not None:
-                roms_root_value = es_entry[0]
-            rr_status, rr_msg = self._validate_roms_root(roms_root_value)
-            parts.append(rr_msg)
-            if rr_status == CheckStatus.FAIL:
+            path_status, path_msg = self._resolve_system_path(
+                yaml_entry=yaml_entry,
+                es_entry=es_entry,
+                current_transport=current_transport,
+                raw_entry=yaml_raw_by_name.get(name),
+            )
+            parts.append(path_msg)
+            if path_status == CheckStatus.FAIL:
                 status = CheckStatus.FAIL
             results.append(
                 CheckResult(
@@ -335,6 +430,149 @@ class Doctor:
                 )
             )
         return results
+
+    def _resolve_system_path(
+        self,
+        yaml_entry: System | None,
+        es_entry: tuple[str, list[str]] | None,
+        current_transport: Transport | None,
+        raw_entry: dict[str, object] | None = None,
+    ) -> tuple[CheckStatus, str]:
+        """Resolve and check a system's filesystem path.
+
+        YAML systems have explicit relative_path/full_path. es_systems
+        entries have an absolute path. If we can't resolve, report
+        FAIL with the reason.
+        """
+        from multiscraper.config.loader import resolve_path
+
+        if yaml_entry is not None:
+            if current_transport is None:
+                return (
+                    CheckStatus.FAIL,
+                    "path: no current_transport in config.yaml",
+                )
+            try:
+                resolved = resolve_path(current_transport, yaml_entry)
+            except Exception as exc:
+                return CheckStatus.FAIL, f"path: {exc}"
+            return self._check_path_access(resolved, current_transport)
+        if es_entry is not None:
+            return self._check_path_access(es_entry[0], current_transport)
+        if raw_entry is not None and current_transport is not None:
+            rel = raw_entry.get("relative_path")
+            full = raw_entry.get("full_path")
+            if isinstance(full, str) and full:
+                return self._check_path_access(full, current_transport)
+            if isinstance(rel, str) and rel:
+                base = current_transport.base_path.rstrip("/")
+                if not rel.startswith("/"):
+                    rel = "/" + rel
+                return self._check_path_access(base + rel, current_transport)
+        return CheckStatus.FAIL, "path: unknown"
+
+    def _check_path_access(
+        self, path: str, current_transport: Transport | None
+    ) -> tuple[CheckStatus, str]:
+        if current_transport is not None and current_transport.kind == "ssh":
+            try:
+                from multiscraper.transport.ssh import SshTransport
+
+                transport = SshTransport(
+                    host=current_transport.host or "",
+                    port=current_transport.port,
+                    user=current_transport.user,
+                    password=current_transport.password,
+                    key_file=current_transport.key_file,
+                    known_hosts=current_transport.known_hosts,
+                    auto_trust=current_transport.auto_trust,
+                )
+                asyncio.run(transport._ensure_connected())
+            except Exception as exc:
+                return CheckStatus.FAIL, f"path: ssh unreachable ({exc})"
+            return CheckStatus.OK, f"path: {path} (ssh)"
+        if not Path(path).exists():
+            return CheckStatus.FAIL, f"path: {path} not found"
+        return CheckStatus.OK, f"path: {path}"
+
+    def check_transports(
+        self, transports: list[Transport]
+    ) -> list[CheckResult]:
+        """Test reachability of each transport."""
+        results: list[CheckResult] = []
+        for t in transports:
+            name = f"transport[{t.name}]"
+            if t.kind == "local":
+                if Path(t.base_path).exists():
+                    results.append(
+                        CheckResult(
+                            name=name,
+                            status=CheckStatus.OK,
+                            message=f"{t.base_path} exists",
+                        )
+                    )
+                else:
+                    results.append(
+                        CheckResult(
+                            name=name,
+                            status=CheckStatus.FAIL,
+                            message=f"{t.base_path} not found",
+                        )
+                    )
+                continue
+            try:
+                from multiscraper.transport.ssh import SshTransport
+
+                transport = SshTransport(
+                    host=t.host or "",
+                    port=t.port,
+                    user=t.user,
+                    password=t.password,
+                    key_file=t.key_file,
+                    known_hosts=t.known_hosts,
+                    auto_trust=t.auto_trust,
+                )
+                asyncio.run(transport._ensure_connected())
+                results.append(
+                    CheckResult(
+                        name=name,
+                        status=CheckStatus.OK,
+                        message=f"{t.user}@{t.host} reachable",
+                    )
+                )
+            except Exception as exc:
+                results.append(
+                    CheckResult(
+                        name=name,
+                        status=CheckStatus.FAIL,
+                        message=f"{exc}",
+                    )
+                )
+        return results
+
+    def check_current_transport(self, config: TransportsConfig) -> CheckResult:
+        """Validate that current_transport is set and references a real transport."""
+        if not config.current_transport:
+            return CheckResult(
+                name="current_transport",
+                status=CheckStatus.FAIL,
+                message="current_transport is not set",
+            )
+        names = [t.name for t in config.transports]
+        if config.current_transport not in names:
+            return CheckResult(
+                name="current_transport",
+                status=CheckStatus.FAIL,
+                message=(
+                    f"current_transport '{config.current_transport}' "
+                    f"not in transports: {names}"
+                ),
+            )
+        return CheckResult(
+            name="current_transport",
+            status=CheckStatus.OK,
+            message=f"current_transport={config.current_transport}",
+        )
 
     def check_es_systems(self, override_path: Path | None = None) -> CheckResult:
         from multiscraper.config.es_systems_parser import parse_es_systems
@@ -542,84 +780,6 @@ class Doctor:
             message="all required env vars present",
         )
 
-    def check_ssh_profile(
-        self,
-        profile_name: str,
-        profile: dict[str, object],
-    ) -> CheckResult:
-        resolved: dict[str, object] = {
-            k: resolve_env_vars(v) if isinstance(v, str) else v
-            for k, v in profile.items()
-        }
-
-        def _coerce_bool(v: object) -> bool:
-            return v if isinstance(v, bool) else False
-
-        def _coerce_int(v: object, default: int) -> int:
-            if isinstance(v, int) and not isinstance(v, bool):
-                return v
-            if isinstance(v, str) and v:
-                try:
-                    return int(v)
-                except ValueError:
-                    return default
-            return default
-
-        kh = resolved.get("known_hosts")
-        if isinstance(kh, str) and kh:
-            kh = str(Path(kh).expanduser())
-
-        try:
-            import asyncio
-
-            user_raw = resolved.get("user")
-            pwd_raw = resolved.get("password")
-            key_raw = resolved.get("key_file")
-            transport = SshTransport(
-                host=str(resolved.get("host", "")),
-                port=_coerce_int(resolved.get("port"), 22),
-                user=user_raw if isinstance(user_raw, str) else None,
-                password=pwd_raw if isinstance(pwd_raw, str) else None,
-                key_file=key_raw if isinstance(key_raw, str) else None,
-                known_hosts=kh if isinstance(kh, str) else None,
-                auto_trust=_coerce_bool(resolved.get("auto_trust")),
-            )
-            asyncio.run(transport._ensure_connected())
-        except Exception as exc:
-            return CheckResult(
-                name=f"ssh[{profile_name}]",
-                status=CheckStatus.FAIL,
-                message=f"{exc}",
-            )
-        host = resolved.get("host", "?")
-        user = resolved.get("user", "?")
-        return CheckResult(
-            name=f"ssh[{profile_name}]",
-            status=CheckStatus.OK,
-            message=f"{user}@{host} reachable",
-        )
-
-    def check_ssh_profiles(
-        self, config_path: Path | None = None
-    ) -> list[CheckResult]:
-        from typing import cast
-
-        import yaml
-
-        path = config_path or Path("config/systems.yaml")
-        if not path.exists():
-            return []
-        try:
-            raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-        except Exception:
-            return []
-        profiles_obj = raw.get("ssh_profiles", {}) if isinstance(raw, dict) else {}
-        profiles = cast(dict[str, dict[str, object]], profiles_obj)
-        return [
-            self.check_ssh_profile(name, profile)
-            for name, profile in profiles.items()
-        ]
-
     def _build_provider_registry(self) -> ProviderRegistry:
         """Build a ProviderRegistry with all known provider classes pre-registered."""
         reg = ProviderRegistry()
@@ -744,41 +904,31 @@ def run_doctor(
     report = DoctorReport()
 
     report.checks.append(doctor.check_python_version())
+    report.checks.append(doctor.check_transports_config())
     report.checks.append(doctor.check_sources_config())
     report.checks.append(doctor.check_systems_config())
     report.checks.append(doctor.check_es_systems())
     report.checks.append(doctor.check_disk_space())
 
     try:
-        from multiscraper.config.loader import load_config
+        from multiscraper.config.loader import load_config, load_config_yaml
 
         cfg = load_config(Path("config/sources.yaml"))
         report.checks.append(doctor.check_provider_credentials(cfg.providers))
     except Exception:
         pass
 
-    report.checks.extend(doctor.check_ssh_profiles())
-
-    if ssh_profile:
-        already_checked = any(
-            c.name == f"ssh[{ssh_profile}]" for c in report.checks
-        )
-        if not already_checked:
-            from typing import cast
-
-            import yaml
-
-            systems_path = Path("config/systems.yaml")
-            if systems_path.exists():
-                raw = yaml.safe_load(systems_path.read_text(encoding="utf-8"))
-                if isinstance(raw, dict):
-                    profiles_obj = raw.get("ssh_profiles", {})
-                    profiles = cast(dict[str, dict[str, object]], profiles_obj)
-                    profile = profiles.get(ssh_profile)
-                    if profile:
-                        report.checks.append(
-                            doctor.check_ssh_profile(ssh_profile, profile)
-                        )
+    try:
+        transports_cfg = load_config_yaml(Path("config/config.yaml"))
+        report.checks.append(doctor.check_current_transport(transports_cfg))
+        report.checks.extend(doctor.check_transports(transports_cfg.transports))
+        if ssh_profile:
+            for t in transports_cfg.transports:
+                if t.name == ssh_profile:
+                    report.checks.extend(doctor.check_transports([t]))
+                    break
+    except Exception:
+        pass
 
     if systems:
         report.checks.extend(doctor.check_systems_config_names(systems))

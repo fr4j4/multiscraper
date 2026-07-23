@@ -24,9 +24,51 @@ def test_cli_help():
     assert "doctor" in result.output
 
 
-def test_cli_validate_config_no_file():
+def test_cli_validate_config_no_file(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
     runner = CliRunner()
-    result = runner.invoke(main, ["validate-config", "--config", "nonexistent.yaml"])
+    result = runner.invoke(main, ["validate-config"])
+    assert result.exit_code != 0
+
+
+def test_cli_validate_config_ok_with_three_yamls(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    cfg_dir = tmp_path / "config"
+    cfg_dir.mkdir()
+    (cfg_dir / "config.yaml").write_text(
+        "transports:\n"
+        "  - name: local\n"
+        "    kind: local\n"
+        "    base_path: /\n"
+        "current_transport: local\n"
+    )
+    (cfg_dir / "sources.yaml").write_text(
+        "providers:\n  - id: local_override\n    enabled: true\n"
+    )
+    (cfg_dir / "systems.yaml").write_text(
+        "systems:\n  - name: snes\n    relative_path: /snes\n    extensions: [sfc]\n"
+    )
+    runner = CliRunner()
+    result = runner.invoke(main, ["validate-config"])
+    assert result.exit_code == 0
+    assert "valid" in result.output.lower()
+
+
+def test_cli_validate_config_invalid_transport(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    cfg_dir = tmp_path / "config"
+    cfg_dir.mkdir()
+    (cfg_dir / "config.yaml").write_text(
+        "transports: []\ncurrent_transport: nope\n"
+    )
+    (cfg_dir / "sources.yaml").write_text(
+        "providers:\n  - id: local_override\n    enabled: true\n"
+    )
+    (cfg_dir / "systems.yaml").write_text(
+        "systems:\n  - name: snes\n    relative_path: /snes\n    extensions: [sfc]\n"
+    )
+    runner = CliRunner()
+    result = runner.invoke(main, ["validate-config"])
     assert result.exit_code != 0
 
 

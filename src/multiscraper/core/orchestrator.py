@@ -6,7 +6,7 @@ import asyncio
 import logging
 from pathlib import Path
 
-from multiscraper.config.models import MultiscraperConfig
+from multiscraper.config.models import MultiscraperConfig, OrchestratorConfig
 from multiscraper.core.batcher import batch_jobs
 from multiscraper.core.job import Job
 from multiscraper.core.shutdown import ShutdownHandler
@@ -30,12 +30,14 @@ class Orchestrator:
         db_path: str,
         csv_path: Path,
         media_root: Path,
+        orchestrator: OrchestratorConfig | None = None,
     ):
         self._registry = registry
         self._config = config
+        self._orchestrator = orchestrator or OrchestratorConfig()
         self._db = Database(db_path)
         self._csv_writer = CsvWriter(
-            csv_path, flush_every=config.orchestrator.csv_flush_every,
+            csv_path, flush_every=self._orchestrator.csv_flush_every,
         )
         self._media_root = media_root
         self._shutdown = ShutdownHandler()
@@ -53,7 +55,7 @@ class Orchestrator:
         await self._csv_writer.write_header()
 
         batches = batch_jobs(
-            roms, run_id, self._config.orchestrator.batch_size,
+            roms, run_id, self._orchestrator.batch_size,
         )
         for batch in batches:
             for job in batch:
@@ -61,15 +63,15 @@ class Orchestrator:
 
         self._supervisor = Supervisor(
             queue=self._queue,
-            max_attempts=self._config.orchestrator.max_job_attempts,
-            failure_window_sec=self._config.orchestrator.worker_failure_window_sec,
-            failure_threshold=self._config.orchestrator.worker_failure_threshold,
+            max_attempts=self._orchestrator.max_job_attempts,
+            failure_window_sec=self._orchestrator.worker_failure_window_sec,
+            failure_threshold=self._orchestrator.worker_failure_threshold,
         )
 
         loop = asyncio.get_event_loop()
         self._shutdown.install(loop)
 
-        n_workers = self._config.orchestrator.workers
+        n_workers = self._orchestrator.workers
         async with asyncio.TaskGroup() as tg:
             tg.create_task(self._csv_writer_loop())
             for i in range(n_workers):

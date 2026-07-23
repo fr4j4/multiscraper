@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from aioresponses import aioresponses
 
-from multiscraper.config.models import ProviderEntry
+from multiscraper.config.models import (
+    OrchestratorConfig,
+    ProviderEntry,
+    Transport,
+    TransportsConfig,
+)
 from multiscraper.doctor import CheckStatus, Doctor, DoctorReport, run_doctor
 
 
@@ -108,7 +113,9 @@ def test_check_systems_config_missing(tmp_path, monkeypatch):
 
 def test_check_systems_config_present(tmp_path, monkeypatch):
     cfg = tmp_path / "systems.yaml"
-    cfg.write_text("ssh_profiles: {}\n")
+    cfg.write_text(
+        "systems:\n  - name: snes\n    relative_path: /snes\n    extensions: [sfc]\n"
+    )
     monkeypatch.chdir(tmp_path)
     doctor = Doctor()
     result = doctor.check_systems_config(config_path=cfg)
@@ -233,16 +240,22 @@ def test_run_doctor_with_ssh_profile(tmp_path, monkeypatch):
     (tmp_path / "config" / "sources.yaml").write_text(
         "providers:\n  - id: local_override\n    enabled: true\n"
     )
-    (tmp_path / "config" / "systems.yaml").write_text(
-        "ssh_profiles:\n  arcade:\n    host: 192.0.2.1\n    user: u\n"
+    (tmp_path / "config" / "config.yaml").write_text(
+        "transports:\n"
+        "  - name: arcade\n"
+        "    kind: ssh\n"
+        "    host: 192.0.2.1\n"
+        "    user: arcade\n"
         "    password: ${env:ARCADE_PASS}\n"
+        "    base_path: /home/arcade/ROMs\n"
+        "current_transport: arcade\n"
     )
-    with patch("multiscraper.doctor.SshTransport") as mock:
+    with patch("multiscraper.transport.ssh.SshTransport") as mock:
         instance = MagicMock()
-        instance._ensure_connected = MagicMock()
+        instance._ensure_connected = AsyncMock()
         mock.return_value = instance
         report = run_doctor(ssh_profile="arcade")
-        assert any(c.name.startswith("ssh[arcade]") for c in report.checks)
+        assert any(c.name == "transport[arcade]" for c in report.checks)
         assert mock.called
 
 
@@ -529,13 +542,16 @@ def test_check_systems_config_from_es_systems(tmp_path, monkeypatch):
     es_dir = tmp_path / ".emulationstation"
     es_dir.mkdir(parents=True, exist_ok=True)
     es_cfg = es_dir / "es_systems.cfg"
+    base = tmp_path / "roms"
+    base.mkdir()
+    (base / "snes").mkdir()
     es_cfg.write_text(
         _es_systems_xml(
             [
                 {
                     "name": "snes",
                     "fullname": "SNES",
-                    "path": "/home/arcade/ROMs/snes",
+                    "path": str(base / "snes"),
                     "extension": ".smc .sfc",
                 }
             ]
@@ -543,14 +559,15 @@ def test_check_systems_config_from_es_systems(tmp_path, monkeypatch):
     )
     config_dir = tmp_path / "config"
     config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "config.yaml").write_text(
+        "transports:\n"
+        "  - name: arcade\n"
+        "    kind: local\n"
+        f"    base_path: {base}\n"
+        "current_transport: arcade\n"
+    )
     (config_dir / "systems.yaml").write_text(
-        "ssh_profiles:\n"
-        "  arcade:\n"
-        "    host: 192.0.2.1\n"
-        "    user: u\n"
-        "systems:\n"
-        "  - name: snes\n"
-        "    ssh_profile: arcade\n"
+        "systems:\n  - name: snes\n    relative_path: /snes\n    extensions: [sfc]\n"
     )
     monkeypatch.setattr("multiscraper.doctor.Path.home", lambda: tmp_path)
     monkeypatch.chdir(tmp_path)
@@ -563,21 +580,24 @@ def test_check_systems_config_from_es_systems(tmp_path, monkeypatch):
 
 
 def test_check_systems_config_from_yaml(tmp_path, monkeypatch):
+    base = tmp_path / "roms"
+    base.mkdir()
+    (base / "snes").mkdir()
     config_dir = tmp_path / "config"
     config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "config.yaml").write_text(
+        "transports:\n"
+        "  - name: local\n"
+        "    kind: local\n"
+        f"    base_path: {base}\n"
+        "current_transport: local\n"
+    )
     systems_yaml = config_dir / "systems.yaml"
     systems_yaml.write_text(
-        "ssh_profiles:\n"
-        "  arcade:\n"
-        "    host: 192.0.2.1\n"
-        "    user: u\n"
         "systems:\n"
         "  - name: snes\n"
-        "    ssh_profile: arcade\n"
-        "    roms_root: ssh://arcade/home/roms/snes\n"
-        "    extensions:\n"
-        "      - .smc\n"
-        "      - .sfc\n"
+        "    relative_path: /snes\n"
+        "    extensions: [.smc, .sfc]\n"
     )
     monkeypatch.chdir(tmp_path)
     doctor = Doctor()
@@ -643,13 +663,16 @@ def test_check_systems_config_es_only_no_override(tmp_path, monkeypatch):
     es_dir = tmp_path / ".emulationstation"
     es_dir.mkdir(parents=True, exist_ok=True)
     es_cfg = es_dir / "es_systems.cfg"
+    base = tmp_path / "roms"
+    base.mkdir()
+    (base / "snes").mkdir()
     es_cfg.write_text(
         _es_systems_xml(
             [
                 {
                     "name": "snes",
                     "fullname": "SNES",
-                    "path": "/roms/snes",
+                    "path": str(base / "snes"),
                     "extension": ".smc",
                 }
             ]
@@ -677,13 +700,23 @@ def test_check_systems_config_unknown_name(tmp_path, monkeypatch):
 
 
 def test_check_systems_config_explicit_wildcard(tmp_path, monkeypatch):
+    base = tmp_path / "roms"
+    base.mkdir()
+    (base / "snes").mkdir()
     config_dir = tmp_path / "config"
     config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "config.yaml").write_text(
+        "transports:\n"
+        "  - name: local\n"
+        "    kind: local\n"
+        f"    base_path: {base}\n"
+        "current_transport: local\n"
+    )
     systems_yaml = config_dir / "systems.yaml"
     systems_yaml.write_text(
         "systems:\n"
         "  - name: snes\n"
-        "    roms_root: ssh://arcade/home/roms/snes\n"
+        "    relative_path: /snes\n"
         "    extensions: [\"*\"]\n"
     )
     monkeypatch.chdir(tmp_path)
@@ -697,13 +730,22 @@ def test_check_systems_config_explicit_wildcard(tmp_path, monkeypatch):
 
 
 def test_check_systems_config_empty_list_fail(tmp_path, monkeypatch):
+    base = tmp_path / "roms"
+    base.mkdir()
     config_dir = tmp_path / "config"
     config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "config.yaml").write_text(
+        "transports:\n"
+        "  - name: local\n"
+        "    kind: local\n"
+        f"    base_path: {base}\n"
+        "current_transport: local\n"
+    )
     systems_yaml = config_dir / "systems.yaml"
     systems_yaml.write_text(
         "systems:\n"
         "  - name: snes\n"
-        "    roms_root: ssh://arcade/home/roms/snes\n"
+        "    relative_path: /snes\n"
         "    extensions: []\n"
     )
     monkeypatch.chdir(tmp_path)
@@ -716,13 +758,23 @@ def test_check_systems_config_empty_list_fail(tmp_path, monkeypatch):
 
 
 def test_check_systems_config_extension_without_dot_ok(tmp_path, monkeypatch):
+    base = tmp_path / "roms"
+    base.mkdir()
+    (base / "snes").mkdir()
     config_dir = tmp_path / "config"
     config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "config.yaml").write_text(
+        "transports:\n"
+        "  - name: local\n"
+        "    kind: local\n"
+        f"    base_path: {base}\n"
+        "current_transport: local\n"
+    )
     systems_yaml = config_dir / "systems.yaml"
     systems_yaml.write_text(
         "systems:\n"
         "  - name: snes\n"
-        "    roms_root: ssh://arcade/home/roms/snes\n"
+        "    relative_path: /snes\n"
         "    extensions: [gba]\n"
     )
     monkeypatch.chdir(tmp_path)
@@ -735,13 +787,23 @@ def test_check_systems_config_extension_without_dot_ok(tmp_path, monkeypatch):
 
 
 def test_check_systems_config_mixed_dot_and_no_dot(tmp_path, monkeypatch):
+    base = tmp_path / "roms"
+    base.mkdir()
+    (base / "snes").mkdir()
     config_dir = tmp_path / "config"
     config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "config.yaml").write_text(
+        "transports:\n"
+        "  - name: local\n"
+        "    kind: local\n"
+        f"    base_path: {base}\n"
+        "current_transport: local\n"
+    )
     systems_yaml = config_dir / "systems.yaml"
     systems_yaml.write_text(
         "systems:\n"
         "  - name: snes\n"
-        "    roms_root: ssh://arcade/home/roms/snes\n"
+        "    relative_path: /snes\n"
         "    extensions: [gba, .gb]\n"
     )
     monkeypatch.chdir(tmp_path)
@@ -754,13 +816,22 @@ def test_check_systems_config_mixed_dot_and_no_dot(tmp_path, monkeypatch):
 
 
 def test_check_systems_config_extension_invalid_chars(tmp_path, monkeypatch):
+    base = tmp_path / "roms"
+    base.mkdir()
     config_dir = tmp_path / "config"
     config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "config.yaml").write_text(
+        "transports:\n"
+        "  - name: local\n"
+        "    kind: local\n"
+        f"    base_path: {base}\n"
+        "current_transport: local\n"
+    )
     systems_yaml = config_dir / "systems.yaml"
     systems_yaml.write_text(
         "systems:\n"
         "  - name: snes\n"
-        "    roms_root: ssh://arcade/home/roms/snes\n"
+        "    relative_path: /snes\n"
         "    extensions: [BAD-EXT!]\n"
     )
     monkeypatch.chdir(tmp_path)
@@ -772,13 +843,21 @@ def test_check_systems_config_extension_invalid_chars(tmp_path, monkeypatch):
 
 
 def test_check_systems_config_roms_root_invalid(tmp_path, monkeypatch):
+    base = tmp_path / "roms"
+    base.mkdir()
     config_dir = tmp_path / "config"
     config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "config.yaml").write_text(
+        "transports:\n"
+        "  - name: local\n"
+        "    kind: local\n"
+        f"    base_path: {base}\n"
+        "current_transport: local\n"
+    )
     systems_yaml = config_dir / "systems.yaml"
     systems_yaml.write_text(
         "systems:\n"
         "  - name: snes\n"
-        "    roms_root: not-a-path\n"
         "    extensions: [.smc]\n"
     )
     monkeypatch.chdir(tmp_path)
@@ -787,4 +866,191 @@ def test_check_systems_config_roms_root_invalid(tmp_path, monkeypatch):
     assert len(results) == 1
     assert results[0].name == "system[snes]"
     assert results[0].status == CheckStatus.FAIL
-    assert "roms_root" in results[0].message.lower()
+    assert "path" in results[0].message.lower() or "must have" in results[0].message.lower()
+
+
+def test_check_transports_local_path_exists(tmp_path, monkeypatch):
+    base = tmp_path / "roms"
+    base.mkdir()
+    doctor = Doctor()
+    results = doctor.check_transports(
+        [Transport(name="local", kind="local", base_path=str(base))]
+    )
+    assert len(results) == 1
+    assert results[0].name == "transport[local]"
+    assert results[0].status == CheckStatus.OK
+
+
+def test_check_transports_local_path_missing(tmp_path):
+    doctor = Doctor()
+    results = doctor.check_transports(
+        [Transport(name="local", kind="local", base_path=str(tmp_path / "nope"))]
+    )
+    assert len(results) == 1
+    assert results[0].status == CheckStatus.FAIL
+    assert "not found" in results[0].message.lower() or "missing" in results[0].message.lower()
+
+
+def test_check_transports_ssh_reachable():
+    doctor = Doctor()
+    transport = Transport(
+        name="arcade",
+        kind="ssh",
+        host="192.0.2.1",
+        user="arcade",
+        base_path="/home/arcade/ROMs",
+    )
+    with patch("multiscraper.transport.ssh.SshTransport") as mock:
+        instance = MagicMock()
+        instance._ensure_connected = AsyncMock()
+        instance.list_dir = MagicMock(return_value=["snes", "gba"])
+        mock.return_value = instance
+        results = doctor.check_transports([transport])
+    assert len(results) == 1
+    assert results[0].name == "transport[arcade]"
+    assert results[0].status == CheckStatus.OK
+
+
+def test_check_transports_ssh_unreachable():
+    doctor = Doctor()
+    transport = Transport(
+        name="arcade",
+        kind="ssh",
+        host="192.0.2.1",
+        user="arcade",
+        base_path="/home/arcade/ROMs",
+    )
+    with patch("multiscraper.transport.ssh.SshTransport") as mock:
+        instance = MagicMock()
+        instance._ensure_connected = AsyncMock(side_effect=RuntimeError("auth failed"))
+        mock.return_value = instance
+        results = doctor.check_transports([transport])
+    assert len(results) == 1
+    assert results[0].status == CheckStatus.FAIL
+    assert "auth failed" in results[0].message
+
+
+def test_check_current_transport_defined_ok():
+    doctor = Doctor()
+    cfg = TransportsConfig(
+        transports=[Transport(name="arcade", kind="local", base_path="/x")],
+        current_transport="arcade",
+    )
+    result = doctor.check_current_transport(cfg)
+    assert result.name == "current_transport"
+    assert result.status == CheckStatus.OK
+
+
+def test_check_current_transport_unknown_fails():
+    doctor = Doctor()
+    cfg = TransportsConfig.model_construct(
+        transports=[Transport(name="arcade", kind="local", base_path="/x")],
+        current_transport="missing",
+        defaults={},
+        orchestrator=OrchestratorConfig(),
+    )
+    result = doctor.check_current_transport(cfg)
+    assert result.status == CheckStatus.FAIL
+    assert "missing" in result.message
+
+
+def test_check_systems_with_relative_path_resolves(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    base = tmp_path / "roms"
+    base.mkdir()
+    (base / "snes").mkdir()
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "config.yaml").write_text(
+        "transports:\n"
+        "  - name: local\n"
+        "    kind: local\n"
+        f"    base_path: {base}\n"
+        "current_transport: local\n"
+    )
+    (config_dir / "systems.yaml").write_text(
+        "systems:\n"
+        "  - name: snes\n"
+        "    relative_path: /snes\n"
+        "    extensions: [sfc]\n"
+    )
+    monkeypatch.setattr("multiscraper.doctor.Path.home", lambda: tmp_path)
+    doctor = Doctor()
+    results = doctor.check_systems_config_names(["snes"])
+    assert len(results) == 1
+    assert results[0].name == "system[snes]"
+    assert results[0].status == CheckStatus.OK
+    assert str(base / "snes") in results[0].message
+
+
+def test_check_systems_with_full_path_resolves(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    base = tmp_path / "external" / "psx"
+    base.mkdir(parents=True)
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "config.yaml").write_text(
+        "transports:\n"
+        "  - name: local\n"
+        "    kind: local\n"
+        f"    base_path: {tmp_path / 'roms'}\n"
+        "current_transport: local\n"
+    )
+    (config_dir / "systems.yaml").write_text(
+        f"systems:\n  - name: psx\n    full_path: {base}\n    extensions: [cue]\n"
+    )
+    monkeypatch.setattr("multiscraper.doctor.Path.home", lambda: tmp_path)
+    doctor = Doctor()
+    results = doctor.check_systems_config_names(["psx"])
+    assert len(results) == 1
+    assert results[0].status == CheckStatus.OK
+    assert str(base) in results[0].message
+
+
+def test_check_systems_path_unreachable(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    base = tmp_path / "roms"
+    base.mkdir()
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "config.yaml").write_text(
+        "transports:\n"
+        "  - name: local\n"
+        "    kind: local\n"
+        f"    base_path: {base}\n"
+        "current_transport: local\n"
+    )
+    (config_dir / "systems.yaml").write_text(
+        "systems:\n  - name: snes\n    relative_path: /nope\n    extensions: [sfc]\n"
+    )
+    monkeypatch.setattr("multiscraper.doctor.Path.home", lambda: tmp_path)
+    doctor = Doctor()
+    results = doctor.check_systems_config_names(["snes"])
+    assert len(results) == 1
+    assert results[0].status == CheckStatus.FAIL
+    assert "not found" in results[0].message.lower() or "missing" in results[0].message.lower()
+
+
+def test_check_systems_both_paths_fails(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "config.yaml").write_text(
+        "transports:\n"
+        "  - name: local\n"
+        "    kind: local\n"
+        "    base_path: /\n"
+        "current_transport: local\n"
+    )
+    (config_dir / "systems.yaml").write_text(
+        "systems:\n"
+        "  - name: snes\n"
+        "    relative_path: /a\n"
+        "    full_path: /b\n"
+        "    extensions: [sfc]\n"
+    )
+    monkeypatch.setattr("multiscraper.doctor.Path.home", lambda: tmp_path)
+    doctor = Doctor()
+    results = doctor.check_systems_config_names(["snes"])
+    assert len(results) == 1
+    assert results[0].status == CheckStatus.FAIL

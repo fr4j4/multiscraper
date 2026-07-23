@@ -1,5 +1,8 @@
 # Example configuration for multiscraper.
 # Copy to sources.yaml and edit as needed.
+#
+# Note: this file no longer holds the `orchestrator:` block. Worker
+# tunables live in `config.yaml` (config.yaml.example).
 
 language:
   text_priority: [en, es, fr, de, it, pt, jp]
@@ -12,17 +15,6 @@ output:
   csv_include_language_columns: true
   partial_min_media: 3
   required_media_types: [image]
-
-orchestrator:
-  workers: 8
-  media_concurrency: 4
-  batch_size: 50
-  max_job_attempts: 3
-  worker_failure_window_sec: 60
-  worker_failure_threshold: 3
-  shutdown_drain_timeout_sec: 180
-  csv_flush_every: 50
-  progress_interval_sec: 0.5
 
 providers:
   - id: local_override

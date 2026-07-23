@@ -2,8 +2,23 @@
 
 from pathlib import Path
 
-from multiscraper.config.loader import load_config, resolve_env_vars
-from multiscraper.config.models import MultiscraperConfig
+import pytest
+from pydantic import ValidationError
+
+from multiscraper.config.loader import (
+    load_config,
+    load_config_yaml,
+    load_systems_yaml,
+    resolve_env_vars,
+    resolve_path,
+)
+from multiscraper.config.models import (
+    MultiscraperConfig,
+    System,
+    SystemsConfig,
+    Transport,
+    TransportsConfig,
+)
 
 
 def test_resolve_env_vars_passthrough():
@@ -95,3 +110,115 @@ provider_defaults:
 
     config = load_config(config_path)
     assert config.providers[0].config["devid"] == "mydev"
+
+
+def test_load_config_yaml_ssh(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("ARCADE_PASS", "secret123")
+    yaml_content = """
+transports:
+  - name: arcade
+    kind: ssh
+    host: 192.168.1.28
+    user: arcade
+    password: ${env:ARCADE_PASS}
+    base_path: /home/arcade/ROMs
+
+current_transport: arcade
+
+orchestrator:
+  workers: 4
+"""
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(yaml_content)
+    cfg = load_config_yaml(cfg_path)
+    assert isinstance(cfg, TransportsConfig)
+    assert cfg.current_transport == "arcade"
+    assert cfg.transports[0].password == "secret123"
+    assert cfg.orchestrator.workers == 4
+
+
+def test_load_config_yaml_local(tmp_path: Path):
+    yaml_content = """
+transports:
+  - name: workstation
+    kind: local
+    base_path: /home/user/roms
+
+current_transport: workstation
+"""
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(yaml_content)
+    cfg = load_config_yaml(cfg_path)
+    assert cfg.current_transport == "workstation"
+    assert cfg.transports[0].base_path == "/home/user/roms"
+
+
+def test_load_config_yaml_invalid_fails(tmp_path: Path):
+    yaml_content = """
+transports: []
+current_transport: nothing
+"""
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(yaml_content)
+    with pytest.raises(ValidationError):
+        load_config_yaml(cfg_path)
+
+
+def test_load_systems_yaml_minimal(tmp_path: Path):
+    yaml_content = """
+systems:
+  - name: snes
+    relative_path: /snes
+    extensions: [sfc, smc]
+  - name: gba
+    relative_path: /gba
+    extensions: [gba]
+"""
+    systems_path = tmp_path / "systems.yaml"
+    systems_path.write_text(yaml_content)
+    cfg = load_systems_yaml(systems_path)
+    assert isinstance(cfg, SystemsConfig)
+    assert len(cfg.systems) == 2
+    assert cfg.systems[0].relative_path == "/snes"
+
+
+def test_load_systems_yaml_invalid_fails(tmp_path: Path):
+    yaml_content = """
+systems:
+  - name: snes
+    extensions: [sfc]
+"""
+    systems_path = tmp_path / "systems.yaml"
+    systems_path.write_text(yaml_content)
+    with pytest.raises(ValidationError):
+        load_systems_yaml(systems_path)
+
+
+def test_resolve_path_full_ignores_base():
+    transport = Transport(name="a", kind="local", base_path="/home/arcade/ROMs")
+    system = System(name="psx", full_path="/mnt/external/roms/psx", extensions=["cue"])
+    assert resolve_path(transport, system) == "/mnt/external/roms/psx"
+
+
+def test_resolve_path_relative_with_slash():
+    transport = Transport(name="a", kind="local", base_path="/home/arcade/ROMs")
+    system = System(name="snes", relative_path="/snes", extensions=["sfc"])
+    assert resolve_path(transport, system) == "/home/arcade/ROMs/snes"
+
+
+def test_resolve_path_relative_without_slash():
+    transport = Transport(name="a", kind="local", base_path="/home/arcade/ROMs")
+    system = System(name="snes", relative_path="snes", extensions=["sfc"])
+    assert resolve_path(transport, system) == "/home/arcade/ROMs/snes"
+
+
+def test_resolve_path_relative_normalizes_trailing_slash_on_base():
+    transport = Transport(name="a", kind="local", base_path="/home/arcade/ROMs/")
+    system = System(name="snes", relative_path="/snes", extensions=["sfc"])
+    assert resolve_path(transport, system) == "/home/arcade/ROMs/snes"
+
+
+def test_resolve_path_empty_base_with_relative():
+    transport = Transport(name="a", kind="local", base_path="")
+    system = System(name="snes", relative_path="/snes", extensions=["sfc"])
+    assert resolve_path(transport, system) == "/snes"

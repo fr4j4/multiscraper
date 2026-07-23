@@ -100,22 +100,44 @@ def scrape(
 
 
 @main.command("validate-config")
-@click.option("--config", default="config/sources.yaml", help="Path to sources.yaml")
-@click.option("--es-systems", default=None, help="Path to es_systems.cfg")
-def validate_config(config: str, es_systems: str | None) -> None:
+@click.option("--config", default="config/config.yaml", help="Path to config.yaml")
+@click.option("--sources", default="config/sources.yaml", help="Path to sources.yaml")
+@click.option(
+    "--systems",
+    "systems_path",
+    default="config/systems.yaml",
+    help="Path to systems.yaml",
+)
+def validate_config(config: str, sources: str, systems_path: str) -> None:
     """Validate configuration files."""
-    from multiscraper.config.loader import load_config
+    from multiscraper.config.loader import (
+        load_config,
+        load_config_yaml,
+        load_systems_yaml,
+    )
 
-    config_path = Path(config)
-    if not config_path.exists():
-        click.echo(f"Error: config file not found: {config}", err=True)
+    cfg_path = Path(config)
+    src_path = Path(sources)
+    sys_path = Path(systems_path)
+    missing = [str(p) for p in (cfg_path, src_path, sys_path) if not p.exists()]
+    if missing:
+        click.echo(
+            f"Config invalid: missing files: {', '.join(missing)}", err=True,
+        )
         sys.exit(1)
 
     try:
-        cfg = load_config(config_path)
-        click.echo(f"Config valid: {len(cfg.providers)} providers configured")
-        click.echo(f"  Match threshold: {cfg.provider_defaults.match_threshold}")
-        click.echo(f"  Workers: {cfg.orchestrator.workers}")
+        transports = load_config_yaml(cfg_path)
+        click.echo(f"Config valid: {len(transports.transports)} transports configured")
+        click.echo(f"  current_transport: {transports.current_transport}")
+        click.echo(f"  Workers: {transports.orchestrator.workers}")
+        sources_cfg = load_config(src_path)
+        click.echo(
+            f"  Sources: {len(sources_cfg.providers)} providers, "
+            f"match threshold: {sources_cfg.provider_defaults.match_threshold}"
+        )
+        systems_cfg = load_systems_yaml(sys_path)
+        click.echo(f"  Systems: {len(systems_cfg.systems)} configured")
     except Exception as exc:
         click.echo(f"Config invalid: {exc}", err=True)
         sys.exit(1)

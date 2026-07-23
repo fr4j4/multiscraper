@@ -91,16 +91,15 @@ async def test_orchestrator_processes_roms(tmp_path: Path) -> None:
     reg.register(FakeProvider())
 
     config = MultiscraperConfig()
-    config.orchestrator = OrchestratorConfig(
-        workers=2, batch_size=10, shutdown_drain_timeout_sec=10,
-    )
-
     orch = Orchestrator(
         registry=reg,
         config=config,
         db_path=str(tmp_path / "test.db"),
         csv_path=tmp_path / "run.csv",
         media_root=tmp_path / "media",
+        orchestrator=OrchestratorConfig(
+            workers=2, batch_size=10, shutdown_drain_timeout_sec=10,
+        ),
     )
 
     run_id = await orch.start(roms=roms, systems=["snes"])

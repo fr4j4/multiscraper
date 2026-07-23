@@ -1,20 +1,162 @@
 # Configuration Reference
 
-`multiscraper` reads two configuration files:
+`multiscraper` reads three configuration files:
 
-- `config/sources.yaml` (or whatever you pass via `--config`). Drives
-  the provider cascade, language preferences, orchestrator tuning, and
-  provider defaults. Loaded and validated by
-  `src/multiscraper/config/loader.py` into a `MultiscraperConfig`
-  Pydantic model (`config/models.py`).
-- `config/systems.yaml` (or `--systems-config`). Drives the
-  transport: where the ROMs live (local or `ssh://`), where media
-  files land, and the SSH profiles to use when reading from a remote
-  host.
+- `config/config.yaml` — transports, `current_transport`, `defaults`,
+  and `orchestrator`. Loaded into a `TransportsConfig` Pydantic model
+  (`config/models.py`).
+- `config/systems.yaml` — declarative systems with `relative_path` or
+  `full_path` (exactly one). Loaded into a `SystemsConfig` Pydantic
+  model.
+- `config/sources.yaml` — provider cascade, language preferences,
+  output format, and provider defaults. Loaded into a
+  `MultiscraperConfig` Pydantic model.
 
 If you have an `es_systems.cfg` (RetroPie / Batocera / Recalbox),
 `multiscraper` auto-discovers it; you do not need a `systems.yaml`.
 See `docs/ems_files.md` and the `es_systems_parser` module.
+
+## `config.yaml`
+
+Example (`config/config.yaml.example`):
+
+```yaml
+transports:
+  - name: arcade
+    kind: ssh
+    host: 192.168.1.28
+    port: 22
+    user: arcade
+    password: ${env:ARCADE_PASS}
+    auto_trust: true
+    base_path: /home/arcade/ROMs
+
+  - name: workstation
+    kind: local
+    base_path: /home/user/roms
+
+current_transport: arcade
+
+defaults:
+  media_root: ~/multiscraper_data/media
+  cache_db: ~/.multiscraper/cache.db
+
+orchestrator:
+  workers: 8
+  media_concurrency: 4
+  batch_size: 50
+  max_job_attempts: 3
+  worker_failure_window_sec: 60
+  worker_failure_threshold: 3
+  shutdown_drain_timeout_sec: 180
+  csv_flush_every: 50
+  progress_interval_sec: 0.5
+```
+
+### `transports` list
+
+Each entry is a `Transport`. The transport is the bridge between
+systems (logical) and the actual ROM files. Exactly one transport
+must be selected via `current_transport`.
+
+| Key | Type | Required | Notes |
+|---|---|---|---|
+| `name` | str | yes | Lowercase slug (`^[a-z0-9_]{1,32}$`). Used in `current_transport` and as a `transport[<name>]` doctor check label. |
+| `kind` | `ssh` \| `local` | yes | Determines how ROMs are read. |
+| `base_path` | str | **yes** | Root directory the transport reads from. Systems reference this with `relative_path` (concatenated) or override with `full_path`. |
+| `host` | str | for `ssh` | Hostname or IP. |
+| `port` | int | no (default `22`) | SSH port. |
+| `user` | str | for `ssh` | SSH user. |
+| `password` | str | no | Plain password (prefer `key_file` or agent). |
+| `key_file` | str | no | Path to a private key. |
+| `known_hosts` | str | no | Path to known_hosts file. |
+| `auto_trust` | bool | no | Auto-trust unknown host keys. |
+
+### `current_transport`
+
+The single transport that is currently active. Must match a
+`transports[].name`. If you have a laptop and a NAS, you flip the
+active transport by editing this field; no other config needs to
+change.
+
+### `defaults`
+
+`defaults` is a free-form `dict` consumed by the orchestrator and
+output modules. The conventional keys are:
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `media_root` | str (path) | `~/multiscraper_data/media` | Where downloaded media lands. |
+| `cache_db` | str (path) | `~/.multiscraper/cache.db` | SQLite cache location. |
+
+### `orchestrator`
+
+`OrchestratorConfig` (`config/models.py`). Tunables for the run.
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `workers` | int | `8` | Number of concurrent `asyncio.Task` workers. |
+| `media_concurrency` | int | `4` | Per-worker parallelism for downloading media. |
+| `batch_size` | int | `50` | ROMs per batch. |
+| `max_job_attempts` | int | `3` | Per-job retry cap before DLQ. |
+| `worker_failure_window_sec` | int | `60` | Sliding window for the worker-quarantine rule. |
+| `worker_failure_threshold` | int | `3` | Failures in the window before quarantine. |
+| `shutdown_drain_timeout_sec` | int | `180` | Soft drain budget for SIGTERM. |
+| `csv_flush_every` | int | `50` | Rows buffered between CSV flushes. |
+| `progress_interval_sec` | float | `0.5` | Progress reporter tick. |
+
+## `systems.yaml`
+
+Example (`config/systems.example.yaml`):
+
+```yaml
+systems:
+  - name: snes
+    relative_path: /snes
+    extensions: [sfc, smc]
+
+  - name: gba
+    relative_path: /gba
+    extensions: [gba]
+
+  - name: psx
+    full_path: /mnt/external/roms/psx
+    extensions: [cue, bin, iso]
+```
+
+### Per-system `systems` entries
+
+| Key | Type | Required | Notes |
+|---|---|---|---|
+| `name` | str | yes | Must match `^[a-z0-9_]{1,32}$`. |
+| `extensions` | list[str] | **yes** | Wildcard `["*"]` or a list like `[gba, gb]`. Leading dot is optional. |
+| `relative_path` | str | exactly one of these | Concatenated with the current transport's `base_path`. |
+| `full_path` | str | exactly one of these | Used as-is, ignoring `base_path`. |
+
+### Path resolution
+
+When the orchestrator needs the ROMs for a system, the doctor (and
+the orchestrator) resolve the path with this rule:
+
+- `full_path` wins — used as-is, ignoring `base_path`.
+- `relative_path` is concatenated with the current transport's
+  `base_path` with exactly one `/` between them, even if one side
+  already has a separator. The base's trailing `/` is stripped and a
+  leading `/` is added to the relative path if missing.
+
+For example, with `base_path: /home/arcade/ROMs`:
+
+| `relative_path` | resolved |
+|---|---|
+| `/snes` | `/home/arcade/ROMs/snes` |
+| `snes` | `/home/arcade/ROMs/snes` |
+| `/` | `/home/arcade/ROMs/` |
+
+### Accessibility check
+
+The doctor verifies the resolved path is reachable. For
+`kind=local`, the path must exist. For `kind=ssh`, an SSH
+connection is opened and the base path is `ls`-ed.
 
 ## `sources.yaml`
 
@@ -33,17 +175,6 @@ output:
   partial_min_media: 3
   required_media_types: [image]
 
-orchestrator:
-  workers: 8
-  media_concurrency: 4
-  batch_size: 50
-  max_job_attempts: 3
-  worker_failure_window_sec: 60
-  worker_failure_threshold: 3
-  shutdown_drain_timeout_sec: 180
-  csv_flush_every: 50
-  progress_interval_sec: 0.5
-
 providers:
   - id: local_override
     priority: 1
@@ -59,47 +190,6 @@ providers:
       devpassword: ${env:SCREENSCRAPER_DEV_PASSWORD}
       region_priority: [wor, us, eu, jp]
       language_priority: [en, es, fr]
-  - id: igdb
-    priority: 10
-    enabled: true
-    config:
-      client_id: ${env:TWITCH_CLIENT_ID}
-      client_secret: ${env:TWITCH_CLIENT_SECRET}
-  - id: mobygames
-    priority: 15
-    enabled: true
-    config:
-      api_key: ${env:MOBYGAMES_API_KEY}
-  - id: giantbomb
-    priority: 20
-    enabled: true
-    config:
-      api_key: ${env:GIANTBOMB_API_KEY}
-  - id: retroachievements
-    priority: 25
-    enabled: true
-    config:
-      username: ${env:RA_USERNAME}
-      api_key: ${env:RA_API_KEY}
-  - id: rawg
-    priority: 30
-    enabled: true
-    config:
-      api_key: ${env:RAWG_API_KEY}
-  - id: thegamesdb
-    priority: 35
-    enabled: true
-    config:
-      api_key: ${env:TGDB_API_KEY}
-  - id: libretro_thumbnails
-    priority: 40
-    enabled: true
-  - id: openvgdb
-    priority: 45
-    enabled: true
-  - id: gamefaqs
-    priority: 50
-    enabled: true
   - id: local_fallback
     priority: 9999
     enabled: true
@@ -109,15 +199,19 @@ provider_defaults:
   burst: 1
   cooldown_after_blocked_sec: 1800
   max_consecutive_failures: 3
-  timeout_sec: 30
+  timeout_sec: 30.0
   match_threshold: 0.7
   max_candidates_per_provider: 10
 ```
 
+Note: the `orchestrator:` block previously in this file has moved to
+`config.yaml`. Sources.yaml is now strictly provider cascade +
+language + output + provider defaults.
+
 ### `language` block
 
 `LanguageConfig` (`config/models.py`). Drives field-level language
-fallback (spec decisión #31).
+fallback.
 
 | Key | Type | Default | Notes |
 |---|---|---|---|
@@ -137,22 +231,6 @@ promotion.
 | `csv_include_language_columns` | bool | `true` | Adds `name_language`, `desc_language`, `genre_language`, `desc_source`, `genre_source` columns. |
 | `partial_min_media` | int | `3` | Minimum number of media files to promote a result to `OK`. |
 | `required_media_types` | list[str] | `["image"]` | These types MUST be present for `OK`. |
-
-### `orchestrator` block
-
-`OrchestratorConfig` (`config/models.py`). Tunables for the run.
-
-| Key | Type | Default | Notes |
-|---|---|---|---|
-| `workers` | int | `8` | Number of concurrent `asyncio.Task` workers. |
-| `media_concurrency` | int | `4` | Per-worker parallelism for downloading media. |
-| `batch_size` | int | `50` | ROMs per batch. |
-| `max_job_attempts` | int | `3` | Per-job retry cap before DLQ. |
-| `worker_failure_window_sec` | int | `60` | Sliding window for the worker-quarantine rule. |
-| `worker_failure_threshold` | int | `3` | Failures in the window before quarantine. |
-| `shutdown_drain_timeout_sec` | int | `180` | Soft drain budget for SIGTERM (spec decisión #25). |
-| `csv_flush_every` | int | `50` | Rows buffered between CSV flushes. |
-| `progress_interval_sec` | float | `0.5` | Progress reporter tick. |
 
 ### `providers` list
 
@@ -197,89 +275,13 @@ that does not override the value.
 
 | Key | Type | Default | Notes |
 |---|---|---|---|
-| `rate_limit_per_sec` | float | `2.0` | Token-bucket refill rate (spec decisión #29/30). |
+| `rate_limit_per_sec` | float | `2.0` | Token-bucket refill rate. |
 | `burst` | int | `1` | Token-bucket burst. |
-| `cooldown_after_blocked_sec` | int | `1800` | How long a blocked provider stays out (spec decisión #29). |
+| `cooldown_after_blocked_sec` | int | `1800` | How long a blocked provider stays out. |
 | `max_consecutive_failures` | int | `3` | Failures in a row before marking as blocked. |
 | `timeout_sec` | float | `30.0` | HTTP timeout per request. |
-| `match_threshold` | float | `0.7` | Minimum `match_score` to accept a candidate (spec decisión #28). |
-| `max_candidates_per_provider` | int | `10` | Cap on candidates returned per provider per ROM (spec decisión #30). |
-
-## `systems.yaml`
-
-Example (`config/systems.example.yaml`):
-
-```yaml
-# Each system requires:
-#   - extensions: REQUIRED. Use ["*"] for wildcard, or list like [".smc", ".sfc"].
-#   - roms_root:  ssh://<profile>/path  or  ssh://<user>@<host>:<port>/path  for remote
-#                 /absolute/path, ~/relative/path, ./relative, ../parent  for local
-
-roms_root: ssh://arcade             # default if roms_root not set per system
-media_root: ~/multiscraper_data/media  # where to save downloaded media
-
-ssh_profiles:
-  arcade:
-    host: 192.168.1.28
-    port: 22
-    user: arcade
-    key_file: ~/.ssh/id_ed25519
-    known_hosts: ~/.ssh/known_hosts
-
-systems:
-  # Case 1: explicit extension list
-  - name: snes
-    roms_root: ssh://arcade/home/arcade/ROMs/snes
-    extensions: [.smc, .sfc]
-
-  # Case 2: explicit wildcard
-  - name: gba
-    roms_root: ssh://arcade/home/arcade/ROMs/gba
-    extensions: ["*"]
-
-  # Case 3: local path
-  - name: nes
-    roms_root: ~/ROMs/nes
-    extensions: [.nes]
-```
-
-### Per-system `systems` entries
-
-| Key | Type | Required | Notes |
-|---|---|---|---|
-| `name` | str | yes | Must match `^[a-z0-9_]{1,32}$`. |
-| `extensions` | list[str] | **yes** | Accepts the wildcard `["*"]` or a list of `.ext` strings (e.g. `[.smc, .sfc]`). Missing, empty, or items without a leading dot are rejected by `multiscraper doctor --systems`. |
-| `roms_root` | str | no (per-system) | Inherits top-level `roms_root` if omitted. Transport is inferred from the scheme: `ssh://<profile>/path`, `ssh://<user>@<host>:<port>/path` (remote), `/abs/path`, `~/rel`, `./rel`, `../rel` (local). |
-
-### `roms_root` transport inference
-
-The transport is derived from the URL scheme on `roms_root` —
-`ssh://` selects SSH; absolute, `~/`, `./`, `../` select local.
-There is no per-system `ssh_profile` field; remote systems use the
-`ssh_profiles` block at the top of the file by referencing the
-profile name in the `ssh://<profile>/...` URL.
-
-| Key | Type | Default | Notes |
-|---|---|---|---|
-| `roms_root` | str (path or `ssh://` URL) | (required) | Where to look for ROMs. The transport is selected by URL scheme. |
-| `media_root` | str (path) | `$HOME/multiscraper_data/media/` | Per spec decisión #24. The CLI flag `--media-root` overrides this. |
-| `ssh_profiles` | map[str, profile] | `{}` | One named profile per remote host. Reference by URL `ssh://<profile>/...`. |
-| `es_systems_path` | str (path) | auto-discovered | Explicit path to `es_systems.cfg`. |
-
-### SSH profile fields
-
-| Key | Type | Default | Notes |
-|---|---|---|---|
-| `host` | str | (required) | Hostname or IP. |
-| `port` | int | `22` | SSH port. |
-| `user` | str | OS user | SSH user. |
-| `key_file` | str (path) | — | Path to a private key. If omitted, the agent is consulted. |
-| `password` | str | — | Plain password (prefer `key_file` or agent). |
-| `known_hosts` | str (path) | `~/.ssh/known_hosts` | Strict host key check. |
-| `jump_host` | str | — | ProxyJump target. |
-
-See `docs/ssh-setup.md` for the full SSH flow including the
-`--auto-trust` flag and the security implications.
+| `match_threshold` | float | `0.7` | Minimum `match_score` to accept a candidate. |
+| `max_candidates_per_provider` | int | `10` | Cap on candidates returned per provider per ROM. |
 
 ## `es_systems.cfg` auto-discovery
 
@@ -297,33 +299,25 @@ split on whitespace to produce the list of accepted file extensions
 per system. The parser ignores `<system>` entries with no `<name>`.
 
 If both `systems.yaml` and `es_systems.cfg` are present, the
-`es_systems.cfg` takes precedence for the per-system block
-(spec decisión #4). `systems.yaml` still owns the transport
-(`roms_root`, `ssh_profiles`, `media_root`).
+`es_systems.cfg` takes precedence for the per-system block.
+`systems.yaml` still owns the transport-relevant fields
+(`relative_path` / `full_path`) when present.
 
 ## Environment variable resolution
 
-Any string value in the YAML can contain `${env:VAR_NAME}`
-placeholders. They are resolved by `resolve_env_vars` in
-`config/loader.py` at load time. Missing variables resolve to the
-empty string; this is a soft failure, not a hard one. The user is
-expected to spot it on the first `multiscraper validate-config` run.
-
-Examples in the example config:
-
-```yaml
-devid: ${env:SCREENSCRAPER_DEV_ID}
-api_key: ${env:MOBYGAMES_API_KEY}
-password: ${env:ARCADE_SSH_PASS}
-```
+Any string value in any of the three YAMLs can contain
+`${env:VAR_NAME}` placeholders. They are resolved by
+`resolve_env_vars` in `config/loader.py` at load time. Missing
+variables resolve to the empty string; this is a soft failure, not
+a hard one. The user is expected to spot it on the first
+`multiscraper validate-config` run.
 
 The substitution is recursive: it walks into nested dicts and lists.
-A literal `$` must be escaped as `$$`. The placeholder regex is
-`\$\{env:([A-Za-z_][A-Za-z0-9_]*)\}` so the variable name must start
-with a letter or underscore.
+The placeholder regex is `\$\{env:([A-Za-z_][A-Za-z0-9_]*)\}` so the
+variable name must start with a letter or underscore.
 
 ## Validation
 
-Run `multiscraper validate-config` to load the YAML, resolve env
-vars, and run the Pydantic validator. A failure prints the offending
-field and the human-readable error.
+Run `multiscraper validate-config` to load the three YAMLs, resolve
+env vars, and run the Pydantic validators. A failure prints the
+offending field and the human-readable error.

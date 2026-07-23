@@ -109,11 +109,6 @@ async def test_e2e_full_pipeline(tmp_path: Path) -> None:
     reg.register(FakeProvider())
 
     config = MultiscraperConfig()
-    config.orchestrator = OrchestratorConfig(
-        workers=4,
-        batch_size=5,
-        shutdown_drain_timeout_sec=30,
-    )
 
     db_path = tmp_path / "test.db"
     csv_path = tmp_path / "run.csv"
@@ -125,6 +120,11 @@ async def test_e2e_full_pipeline(tmp_path: Path) -> None:
         db_path=str(db_path),
         csv_path=csv_path,
         media_root=media_root,
+        orchestrator=OrchestratorConfig(
+            workers=4,
+            batch_size=5,
+            shutdown_drain_timeout_sec=30,
+        ),
     )
 
     run_id = await orch.start(roms=roms, systems=["snes"])

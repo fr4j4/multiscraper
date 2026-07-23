@@ -15,12 +15,12 @@ multiscraper <command> --help
 | Command | Purpose |
 |---|---|
 | `scrape` | Run a full scrape pass against the configured systems. |
-| `validate-config` | Load and validate `sources.yaml` (and optionally `es_systems.cfg`). |
+| `validate-config` | Load and validate the three YAMLs (`config.yaml`, `sources.yaml`, `systems.yaml`). |
 | `convert-to-es` | Convert a previously cached run into `gamelist.xml` files. |
-| `list-systems` | List the systems discovered from `es_systems.cfg` and/or `roms_root`. |
+| `list-systems` | List the systems discovered from `es_systems.cfg` and/or `systems.yaml`. |
 | `db` | Database subcommands: `stats`, `vacuum`, `reset`, `show-rom`, `show-run`, `cleanup-runs`. |
 | `override` | Manage `source_overrides` rows: `add`, `list`, `remove`, `import`, `export`. |
-| `doctor` | Diagnostic sweep: SSH reachability, provider credentials, disk space. |
+| `doctor` | Diagnostic sweep: transport reachability, current transport, system paths, provider credentials, disk space. |
 
 ## `multiscraper scrape`
 
@@ -92,20 +92,22 @@ multiscraper scrape --dry-run --systems psx
 
 ## `multiscraper validate-config`
 
-Loads the YAML, resolves `${env:...}` placeholders, and runs the
-Pydantic validators. Prints the number of providers and the effective
-defaults.
+Loads the three YAMLs (`config.yaml`, `sources.yaml`, `systems.yaml`),
+resolves `${env:...}` placeholders, and runs the Pydantic validators.
+Prints the number of transports, the active `current_transport`, the
+worker count, the provider count, and the system count.
 
 ```
-multiscraper validate-config [--config PATH] [--es-systems PATH]
+multiscraper validate-config [--config PATH] [--sources PATH] [--systems PATH]
 ```
 
 | Flag | Type | Default | Notes |
 |---|---|---|---|
-| `--config` | path | `config/sources.yaml` | Path to `sources.yaml`. |
-| `--es-systems` | path | `None` | Optional `es_systems.cfg` to parse. |
+| `--config` | path | `config/config.yaml` | Path to `config.yaml`. |
+| `--sources` | path | `config/sources.yaml` | Path to `sources.yaml`. |
+| `--systems` | path | `config/systems.yaml` | Path to `systems.yaml`. |
 
-Exits `0` on success, `1` if the file is missing or invalid.
+Exits `0` on success, `1` if any file is missing or invalid.
 
 ## `multiscraper convert-to-es`
 
@@ -185,17 +187,23 @@ multiscraper override export <file.csv>
 Diagnostic sweep. Reports:
 
 - Python interpreter and version.
+- Whether `config/config.yaml`, `config/sources.yaml`, and
+  `config/systems.yaml` exist and validate.
 - Whether `es_systems.cfg` is found.
+- The currently active transport (`current_transport`) and that it
+  references a real `transports[].name`.
+- For every transport: reachability (local: `Path.exists()`, ssh:
+  `asyncssh.connect` + `ls`).
 - For every enabled provider: whether the required credentials are
   present in the environment.
-- SSH reachability for each `ssh_profiles` entry.
 - Free disk space in `media_root`.
 
 ```
 multiscraper doctor
 ```
 
-Exits `0` if every check passed, `1` otherwise.
+Exits `0` if every check passed, `1` if any are `WARN`, `2` if any
+are `FAIL`.
 
 ### `multiscraper doctor --systems`
 
@@ -209,21 +217,30 @@ validated against `es_systems.cfg` (auto-discovered) and
 - `extensions` — **required**. Valid forms:
   - `["*"]` (wildcard; YAML must quote `*` to avoid alias
     interpretation) — `OK`.
-  - `[.ext, .ext]` — `OK`.
-  - Missing, empty, or items without a leading `.` — `FAIL`.
+  - `[gba, gb]` or `[.gba, .gb]` — `OK` (leading dot is optional).
+  - Missing, empty, or items with invalid characters — `FAIL`.
   If `extensions` is absent from the YAML entry, the value is
   inherited from the matching `es_systems.cfg` row.
-- `roms_root` — format-validated. `ssh://<profile>/...`,
-  `ssh://<user>@<host>:<port>/...`, `/abs/path`, `~/rel`, `./rel`,
-  `../rel` are accepted. Anything else is `FAIL`. The transport is
-  inferred from the scheme, so no per-system `ssh_profile` is
-  required.
+- `path` — resolved against `current_transport` in `config.yaml`.
+  - If the system has `full_path`, that path is used as-is.
+  - If the system has `relative_path`, it is concatenated with the
+    transport's `base_path`.
+  - For `kind=local` the path must exist; for `kind=ssh` the
+    transport must connect.
+  - Missing transport or unreachable path → `FAIL`.
 
 Example:
 
 ```
 multiscraper doctor --systems snes,gba,nes
 ```
+
+### `multiscraper doctor --ssh NAME`
+
+When `--ssh <transport-name>` is given, the named transport in
+`config.yaml` is checked for reachability (in addition to the
+default per-transport checks). The flag accepts the transport name,
+not an `ssh_profiles` key (that concept no longer exists).
 
 ## Logging flags
 
