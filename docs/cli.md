@@ -225,9 +225,14 @@ validated against `es_systems.cfg` (auto-discovered) and
   - If the system has `full_path`, that path is used as-is.
   - If the system has `relative_path`, it is concatenated with the
     transport's `base_path`.
-  - For `kind=local` the path must exist; for `kind=ssh` the
-    transport must connect.
-  - Missing transport or unreachable path → `FAIL`.
+  - The resolved path is then checked via the configured transport:
+    `LocalTransport.path_exists` (`Path.is_dir`) for `kind=local`, or
+    `SshTransport.path_exists` (`test -d` on the remote) for `kind=ssh`.
+  - Exists → `OK` with message
+    `path: {path} exists on {transport.name} ({kind})`.
+  - Missing → `FAIL` with message
+    `path: {path} NOT FOUND on {transport.name} ({kind})`.
+  - Transport unreachable → `FAIL` with the underlying error.
 
 Example:
 

@@ -43,6 +43,8 @@ if TYPE_CHECKING:
         Transport,
         TransportsConfig,
     )
+    from multiscraper.transport.local import LocalTransport
+    from multiscraper.transport.ssh import SshTransport
 
 
 class CheckStatus(StrEnum):
@@ -334,6 +336,11 @@ class Doctor:
         systems.yaml. The path is resolved against the current
         transport in config.yaml and checked for accessibility.
         """
+        return asyncio.run(self._check_systems_config_names_async(names))
+
+    async def _check_systems_config_names_async(
+        self, names: list[str]
+    ) -> list[CheckResult]:
         results: list[CheckResult] = []
         if not names:
             return results
@@ -347,6 +354,7 @@ class Doctor:
                 if t.name == transports_cfg.current_transport:
                     current_transport = t
                     break
+        transport_instance = self._build_transport_instance(current_transport)
         yaml_systems: dict[str, System] = (
             {s.name: s for s in systems_cfg.systems}
             if systems_cfg is not None
@@ -413,11 +421,12 @@ class Doctor:
                 if not ext_value:
                     parts.append("extensions: missing (use [*] or list of extensions)")
                 status = CheckStatus.FAIL
-            path_status, path_msg = self._resolve_system_path(
+            path_status, path_msg = await self._resolve_system_path(
                 yaml_entry=yaml_entry,
                 es_entry=es_entry,
                 current_transport=current_transport,
                 raw_entry=yaml_raw_by_name.get(name),
+                transport_instance=transport_instance,
             )
             parts.append(path_msg)
             if path_status == CheckStatus.FAIL:
@@ -431,12 +440,40 @@ class Doctor:
             )
         return results
 
-    def _resolve_system_path(
+    def _build_transport_instance(
+        self, current_transport: Transport | None
+    ) -> LocalTransport | SshTransport | None:
+        """Build a RomTransport instance for the current transport config.
+
+        Returns None if no current transport is set or the kind is unknown.
+        """
+        if current_transport is None:
+            return None
+        if current_transport.kind == "local":
+            from multiscraper.transport.local import LocalTransport
+
+            return LocalTransport()
+        if current_transport.kind == "ssh":
+            from multiscraper.transport.ssh import SshTransport
+
+            return SshTransport(
+                host=current_transport.host or "",
+                port=current_transport.port,
+                user=current_transport.user,
+                password=current_transport.password,
+                key_file=current_transport.key_file,
+                known_hosts=current_transport.known_hosts,
+                auto_trust=current_transport.auto_trust,
+            )
+        return None
+
+    async def _resolve_system_path(
         self,
         yaml_entry: System | None,
         es_entry: tuple[str, list[str]] | None,
         current_transport: Transport | None,
         raw_entry: dict[str, object] | None = None,
+        transport_instance: object | None = None,
     ) -> tuple[CheckStatus, str]:
         """Resolve and check a system's filesystem path.
 
@@ -456,44 +493,54 @@ class Doctor:
                 resolved = resolve_path(current_transport, yaml_entry)
             except Exception as exc:
                 return CheckStatus.FAIL, f"path: {exc}"
-            return self._check_path_access(resolved, current_transport)
+            return await self._check_path_access(resolved, current_transport, transport_instance)
         if es_entry is not None:
-            return self._check_path_access(es_entry[0], current_transport)
+            return await self._check_path_access(es_entry[0], current_transport, transport_instance)
         if raw_entry is not None and current_transport is not None:
             rel = raw_entry.get("relative_path")
             full = raw_entry.get("full_path")
             if isinstance(full, str) and full:
-                return self._check_path_access(full, current_transport)
+                return await self._check_path_access(
+                    full, current_transport, transport_instance
+                )
             if isinstance(rel, str) and rel:
                 base = current_transport.base_path.rstrip("/")
                 if not rel.startswith("/"):
                     rel = "/" + rel
-                return self._check_path_access(base + rel, current_transport)
+                return await self._check_path_access(
+                    base + rel, current_transport, transport_instance
+                )
         return CheckStatus.FAIL, "path: unknown"
 
-    def _check_path_access(
-        self, path: str, current_transport: Transport | None
+    async def _check_path_access(
+        self,
+        path: str,
+        current_transport: Transport | None,
+        transport_instance: object | None = None,
     ) -> tuple[CheckStatus, str]:
-        if current_transport is not None and current_transport.kind == "ssh":
-            try:
-                from multiscraper.transport.ssh import SshTransport
-
-                transport = SshTransport(
-                    host=current_transport.host or "",
-                    port=current_transport.port,
-                    user=current_transport.user,
-                    password=current_transport.password,
-                    key_file=current_transport.key_file,
-                    known_hosts=current_transport.known_hosts,
-                    auto_trust=current_transport.auto_trust,
-                )
-                asyncio.run(transport._ensure_connected())
-            except Exception as exc:
-                return CheckStatus.FAIL, f"path: ssh unreachable ({exc})"
-            return CheckStatus.OK, f"path: {path} (ssh)"
-        if not Path(path).exists():
+        if current_transport is None:
+            if Path(path).is_dir():
+                return CheckStatus.OK, f"path: {path}"
             return CheckStatus.FAIL, f"path: {path} not found"
-        return CheckStatus.OK, f"path: {path}"
+        kind = current_transport.kind
+        if transport_instance is None:
+            return (
+                CheckStatus.FAIL,
+                f"path: {path} NOT FOUND on {current_transport.name} (transport unavailable)",
+            )
+        try:
+            exists = bool(await transport_instance.path_exists(path))  # type: ignore[attr-defined]
+        except Exception as exc:
+            return (
+                CheckStatus.FAIL,
+                f"path: {path} NOT FOUND on {current_transport.name} ({kind}) ({exc})",
+            )
+        if exists:
+            return CheckStatus.OK, f"path: {path} exists on {current_transport.name} ({kind})"
+        return (
+            CheckStatus.FAIL,
+            f"path: {path} NOT FOUND on {current_transport.name} ({kind})",
+        )
 
     def check_transports(
         self, transports: list[Transport]

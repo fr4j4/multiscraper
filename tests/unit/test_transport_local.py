@@ -54,3 +54,16 @@ async def test_local_hash_sha1(tmp_path: Path):
 async def test_local_close():
     transport = LocalTransport()
     await transport.close()  # should not raise
+
+
+@pytest.mark.asyncio
+async def test_local_path_exists_ok(tmp_path: Path):
+    transport = LocalTransport()
+    assert await transport.path_exists(str(tmp_path)) is True
+
+
+@pytest.mark.asyncio
+async def test_local_path_exists_missing(tmp_path: Path):
+    transport = LocalTransport()
+    missing = tmp_path / "definitely_not_here_xyz123"
+    assert await transport.path_exists(str(missing)) is False

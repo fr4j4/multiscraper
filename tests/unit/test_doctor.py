@@ -1054,3 +1054,123 @@ def test_check_systems_both_paths_fails(tmp_path, monkeypatch):
     results = doctor.check_systems_config_names(["snes"])
     assert len(results) == 1
     assert results[0].status == CheckStatus.FAIL
+
+
+def test_check_system_path_exists_local_ok(tmp_path, monkeypatch):
+    base = tmp_path / "roms"
+    base.mkdir()
+    (base / "gba").mkdir()
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "config.yaml").write_text(
+        "transports:\n"
+        "  - name: local\n"
+        "    kind: local\n"
+        f"    base_path: {base}\n"
+        "current_transport: local\n"
+    )
+    (config_dir / "systems.yaml").write_text(
+        "systems:\n  - name: gba\n    relative_path: /gba\n    extensions: [gba]\n"
+    )
+    monkeypatch.chdir(tmp_path)
+    doctor = Doctor()
+    results = doctor.check_systems_config_names(["gba"])
+    assert len(results) == 1
+    assert results[0].status == CheckStatus.OK
+    assert "exists" in results[0].message.lower()
+    assert "local" in results[0].message.lower()
+
+
+def test_check_system_path_exists_ssh_ok(tmp_path, monkeypatch):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "config.yaml").write_text(
+        "transports:\n"
+        "  - name: arcade\n"
+        "    kind: ssh\n"
+        "    host: 192.0.2.1\n"
+        "    user: arcade\n"
+        "    base_path: /home/arcade/ROMs\n"
+        "current_transport: arcade\n"
+    )
+    (config_dir / "systems.yaml").write_text(
+        "systems:\n"
+        "  - name: gba\n"
+        "    relative_path: /gba\n"
+        "    extensions: [gba]\n"
+    )
+    monkeypatch.chdir(tmp_path)
+
+    with patch("multiscraper.transport.ssh.SshTransport") as mock_cls:
+        instance = MagicMock()
+        instance._ensure_connected = AsyncMock()
+        instance.path_exists = AsyncMock(return_value=True)
+        mock_cls.return_value = instance
+
+        doctor = Doctor()
+        results = doctor.check_systems_config_names(["gba"])
+
+    assert len(results) == 1
+    assert results[0].status == CheckStatus.OK
+    assert "exists" in results[0].message.lower()
+    assert "arcade" in results[0].message.lower()
+    instance.path_exists.assert_awaited_once()
+
+
+def test_check_system_path_missing_local_fails(tmp_path, monkeypatch):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "config.yaml").write_text(
+        "transports:\n"
+        "  - name: local\n"
+        "    kind: local\n"
+        f"    base_path: {tmp_path / 'roms'}\n"
+        "current_transport: local\n"
+    )
+    (config_dir / "systems.yaml").write_text(
+        "systems:\n"
+        "  - name: gba\n"
+        "    relative_path: /gba\n"
+        "    extensions: [gba]\n"
+    )
+    monkeypatch.chdir(tmp_path)
+    doctor = Doctor()
+    results = doctor.check_systems_config_names(["gba"])
+    assert len(results) == 1
+    assert results[0].status == CheckStatus.FAIL
+    assert "not found" in results[0].message.lower()
+
+
+def test_check_system_path_missing_ssh_fails(tmp_path, monkeypatch):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "config.yaml").write_text(
+        "transports:\n"
+        "  - name: arcade\n"
+        "    kind: ssh\n"
+        "    host: 192.0.2.1\n"
+        "    user: arcade\n"
+        "    base_path: /home/arcade/ROMs\n"
+        "current_transport: arcade\n"
+    )
+    (config_dir / "systems.yaml").write_text(
+        "systems:\n"
+        "  - name: gba\n"
+        "    relative_path: /gba\n"
+        "    extensions: [gba]\n"
+    )
+    monkeypatch.chdir(tmp_path)
+
+    with patch("multiscraper.transport.ssh.SshTransport") as mock_cls:
+        instance = MagicMock()
+        instance._ensure_connected = AsyncMock()
+        instance.path_exists = AsyncMock(return_value=False)
+        mock_cls.return_value = instance
+
+        doctor = Doctor()
+        results = doctor.check_systems_config_names(["gba"])
+
+    assert len(results) == 1
+    assert results[0].status == CheckStatus.FAIL
+    assert "not found" in results[0].message.lower()
+    instance.path_exists.assert_awaited_once()

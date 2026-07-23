@@ -6,6 +6,7 @@ Supports key-based auth, password auth, SSH agent, and ProxyJump.
 
 from __future__ import annotations
 
+import shlex
 from collections.abc import AsyncIterator
 from typing import Literal, cast
 
@@ -103,6 +104,12 @@ class SshTransport:
         finally:
             proc.close()
             await proc.wait_closed()
+
+    async def path_exists(self, path: str) -> bool:
+        """Return True if path exists and is a directory on the remote host."""
+        conn = await self._ensure_connected()
+        result = await conn.run(f"test -d {shlex.quote(path)}", check=False)
+        return result.exit_status == 0
 
     async def close(self) -> None:
         if self._conn is not None:

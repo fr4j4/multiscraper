@@ -38,6 +38,10 @@ class RomTransport(Protocol):
         """Stream-read a file, optionally limited to max_bytes."""
         ...
 
+    async def path_exists(self, path: str) -> bool:
+        """Return True if path exists and is a directory."""
+        ...
+
     async def close(self) -> None:
         """Release resources."""
         ...

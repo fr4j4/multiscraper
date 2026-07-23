@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Literal
 
 from multiscraper.transport.base import FileInfo
@@ -59,6 +60,10 @@ class LocalTransport:
                     remaining -= len(chunk)
                     if remaining <= 0:
                         break
+
+    async def path_exists(self, path: str) -> bool:
+        """Return True if path exists and is a directory."""
+        return Path(path).expanduser().is_dir()
 
     async def close(self) -> None:
         pass
