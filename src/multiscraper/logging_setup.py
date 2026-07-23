@@ -1,7 +1,7 @@
 """Logging configuration for multiscraper.
 
 Uses stdlib logging with a RichHandler for terminal output and a
-RotatingFileHandler for JSONL file output. Library loggers are silenced
+FileHandler for JSONL file output. Library loggers are silenced
 to WARNING by default; `-vv` raises them to INFO.
 """
 
@@ -14,7 +14,6 @@ from pathlib import Path
 
 from rich.logging import RichHandler
 
-# Loggers from third-party libraries that we silence by default.
 _LIBRARY_LOGGERS = [
     "aiohttp",
     "asyncio",
@@ -62,7 +61,6 @@ def setup_logging(
 
     lib_level = logging.INFO if verbose >= 2 else logging.WARNING
 
-    # Configure multiscraper logger
     ms_logger = logging.getLogger("multiscraper")
     ms_logger.setLevel(ms_level)
     ms_logger.handlers.clear()
@@ -78,6 +76,5 @@ def setup_logging(
         file_handler.setFormatter(JsonlFormatter())
         ms_logger.addHandler(file_handler)
 
-    # Silence library loggers
     for lib in _LIBRARY_LOGGERS:
         logging.getLogger(lib).setLevel(lib_level)
