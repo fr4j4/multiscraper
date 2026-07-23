@@ -18,11 +18,13 @@ class FakeProvider:
     is_identifier_only = False
     is_offline = False
 
-    async def setup(self, config: dict) -> None: pass
+    async def setup(self, config: dict[str, object]) -> None: pass
     async def close(self) -> None: pass
-    async def search(self, rom: Rom) -> list: return []
-    async def fetch_media(self, candidate, wanted): return {}
-    def detect_blocked(self, response, body: bytes) -> bool: return False
+    async def search(self, rom: Rom) -> list[object]: return []
+    async def fetch_media(
+        self, candidate: object, wanted: object
+    ) -> dict[object, object]: return {}
+    def detect_blocked(self, response: object, body: bytes) -> bool: return False
     def is_auth_missing(self, exc: Exception) -> bool: return False
 
 
@@ -33,14 +35,14 @@ class FakeIdentifier:
         return None
 
 
-def test_registry_register_provider():
+def test_registry_register_provider() -> None:
     reg = ProviderRegistry()
     p = FakeProvider()
     reg.register(p)
     assert reg.get("fake") is p
 
 
-def test_registry_providers_for_media():
+def test_registry_providers_for_media() -> None:
     reg = ProviderRegistry()
     reg.register(FakeProvider())
     providers = reg.providers_for_media(MediaType.IMAGE)
@@ -48,13 +50,13 @@ def test_registry_providers_for_media():
     assert providers[0].name == "fake"
 
 
-def test_registry_providers_for_media_empty():
+def test_registry_providers_for_media_empty() -> None:
     reg = ProviderRegistry()
     providers = reg.providers_for_media(MediaType.MARQUEE)
     assert len(providers) == 0
 
 
-def test_registry_sorted_by_priority():
+def test_registry_sorted_by_priority() -> None:
     class HighPriority(FakeProvider):
         name = "high"
         priority = 1
