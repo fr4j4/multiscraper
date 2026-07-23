@@ -1,11 +1,10 @@
 """Tests for supervisor (worker recovery + DLQ)."""
 
 import asyncio
-from datetime import datetime, timezone
 
 import pytest
 
-from multiscraper.core.job import Job, JobState
+from multiscraper.core.job import Job
 from multiscraper.core.supervisor import Supervisor
 from multiscraper.models import Rom, RomIdentifier
 
