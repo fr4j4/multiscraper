@@ -1,0 +1,19 @@
+# Example systems configuration for multiscraper.
+# If es_systems.cfg exists, it takes precedence; this file overrides.
+
+roms_root: ~/ROMs                      # local path or ssh://user@host:port/path
+media_root: ~/multiscraper_data/media  # where to save downloaded media
+
+# SSH profile (used when roms_root starts with ssh://)
+ssh_profiles:
+  arcade01:
+    host: 192.168.1.42
+    port: 22
+    user: pi
+    key_file: ~/.ssh/id_ed25519
+    # password: ${env:ARCADE_SSH_PASS}
+    known_hosts: ~/.ssh/known_hosts
+    # jump_host: user@bastion.local
+
+# Override es_systems.cfg path (auto-discovered by default)
+# es_systems_path: ~/.emulationstation/es_systems.cfg
