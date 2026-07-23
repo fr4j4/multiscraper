@@ -1,19 +1,41 @@
 # Example systems configuration for multiscraper.
 # If es_systems.cfg exists, it takes precedence; this file overrides.
+#
+# Each system requires:
+#   - extensions: REQUIRED. Use ["*"] for wildcard, or a list like [".smc", ".sfc"].
+#   - roms_root:  transport is inferred from the scheme.
+#                 ssh://<profile>/path  or  ssh://<user>@<host>:<port>/path  for remote
+#                 /absolute/path, ~/relative/path, ./relative, ../parent  for local
 
-roms_root: ~/ROMs                      # local path or ssh://user@host:port/path
+roms_root: ssh://arcade             # default if roms_root not set per system
 media_root: ~/multiscraper_data/media  # where to save downloaded media
 
-# SSH profile (used when roms_root starts with ssh://)
+# SSH profiles (referenced by ssh://<profile>/... in roms_root)
 ssh_profiles:
-  arcade01:
-    host: 192.168.1.42
+  arcade:
+    host: 192.168.1.28
     port: 22
-    user: pi
+    user: arcade
+    # password: ${env:ARCADE_PASS}
     key_file: ~/.ssh/id_ed25519
-    # password: ${env:ARCADE_SSH_PASS}
     known_hosts: ~/.ssh/known_hosts
-    # jump_host: user@bastion.local
+    # auto_trust: true
+
+systems:
+  # Case 1: explicit extension list
+  - name: snes
+    roms_root: ssh://arcade/home/arcade/ROMs/snes
+    extensions: [.smc, .sfc]
+
+  # Case 2: explicit wildcard
+  - name: gba
+    roms_root: ssh://arcade/home/arcade/ROMs/gba
+    extensions: ["*"]
+
+  # Case 3: local path
+  - name: nes
+    roms_root: ~/ROMs/nes
+    extensions: [.nes]
 
 # Override es_systems.cfg path (auto-discovered by default)
 # es_systems_path: ~/.emulationstation/es_systems.cfg

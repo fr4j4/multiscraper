@@ -210,28 +210,60 @@ that does not override the value.
 Example (`config/systems.example.yaml`):
 
 ```yaml
-roms_root: ~/ROMs                      # local path or ssh://user@host:port/path
+# Each system requires:
+#   - extensions: REQUIRED. Use ["*"] for wildcard, or list like [".smc", ".sfc"].
+#   - roms_root:  ssh://<profile>/path  or  ssh://<user>@<host>:<port>/path  for remote
+#                 /absolute/path, ~/relative/path, ./relative, ../parent  for local
+
+roms_root: ssh://arcade             # default if roms_root not set per system
 media_root: ~/multiscraper_data/media  # where to save downloaded media
 
 ssh_profiles:
-  arcade01:
-    host: 192.168.1.42
+  arcade:
+    host: 192.168.1.28
     port: 22
-    user: pi
+    user: arcade
     key_file: ~/.ssh/id_ed25519
-    # password: ${env:ARCADE_SSH_PASS}
     known_hosts: ~/.ssh/known_hosts
-    # jump_host: user@bastion.local
 
-# Override es_systems.cfg path (auto-discovered by default)
-# es_systems_path: ~/.emulationstation/es_systems.cfg
+systems:
+  # Case 1: explicit extension list
+  - name: snes
+    roms_root: ssh://arcade/home/arcade/ROMs/snes
+    extensions: [.smc, .sfc]
+
+  # Case 2: explicit wildcard
+  - name: gba
+    roms_root: ssh://arcade/home/arcade/ROMs/gba
+    extensions: ["*"]
+
+  # Case 3: local path
+  - name: nes
+    roms_root: ~/ROMs/nes
+    extensions: [.nes]
 ```
+
+### Per-system `systems` entries
+
+| Key | Type | Required | Notes |
+|---|---|---|---|
+| `name` | str | yes | Must match `^[a-z0-9_]{1,32}$`. |
+| `extensions` | list[str] | **yes** | Accepts the wildcard `["*"]` or a list of `.ext` strings (e.g. `[.smc, .sfc]`). Missing, empty, or items without a leading dot are rejected by `multiscraper doctor --systems`. |
+| `roms_root` | str | no (per-system) | Inherits top-level `roms_root` if omitted. Transport is inferred from the scheme: `ssh://<profile>/path`, `ssh://<user>@<host>:<port>/path` (remote), `/abs/path`, `~/rel`, `./rel`, `../rel` (local). |
+
+### `roms_root` transport inference
+
+The transport is derived from the URL scheme on `roms_root` —
+`ssh://` selects SSH; absolute, `~/`, `./`, `../` select local.
+There is no per-system `ssh_profile` field; remote systems use the
+`ssh_profiles` block at the top of the file by referencing the
+profile name in the `ssh://<profile>/...` URL.
 
 | Key | Type | Default | Notes |
 |---|---|---|---|
 | `roms_root` | str (path or `ssh://` URL) | (required) | Where to look for ROMs. The transport is selected by URL scheme. |
 | `media_root` | str (path) | `$HOME/multiscraper_data/media/` | Per spec decisión #24. The CLI flag `--media-root` overrides this. |
-| `ssh_profiles` | map[str, profile] | `{}` | One named profile per remote host. Reference by URL `ssh://<profile>@host`. |
+| `ssh_profiles` | map[str, profile] | `{}` | One named profile per remote host. Reference by URL `ssh://<profile>/...`. |
 | `es_systems_path` | str (path) | auto-discovered | Explicit path to `es_systems.cfg`. |
 
 ### SSH profile fields

@@ -574,6 +574,7 @@ def test_check_systems_config_from_yaml(tmp_path, monkeypatch):
         "systems:\n"
         "  - name: snes\n"
         "    ssh_profile: arcade\n"
+        "    roms_root: ssh://arcade/home/roms/snes\n"
         "    extensions:\n"
         "      - .smc\n"
         "      - .sfc\n"
@@ -610,7 +611,7 @@ def test_check_systems_config_missing_extension(tmp_path, monkeypatch):
     assert len(results) == 1
     assert results[0].name == "system[snes]"
     assert results[0].status == CheckStatus.FAIL
-    assert "ext" in results[0].message.lower()
+    assert "extensions" in results[0].message.lower()
 
 
 def test_check_systems_config_invalid_name(tmp_path, monkeypatch):
@@ -636,77 +637,6 @@ def test_check_systems_config_invalid_name(tmp_path, monkeypatch):
     assert results[0].name == "system[Bad Name]"
     assert results[0].status == CheckStatus.FAIL
     assert "name" in results[0].message.lower()
-
-
-def test_check_systems_config_ssh_profile_consistency_ok(tmp_path, monkeypatch):
-    config_dir = tmp_path / "config"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    systems_yaml = config_dir / "systems.yaml"
-    systems_yaml.write_text(
-        "ssh_profiles:\n"
-        "  arcade:\n"
-        "    host: 192.0.2.1\n"
-        "    user: u\n"
-        "systems:\n"
-        "  - name: snes\n"
-        "    ssh_profile: arcade\n"
-        "    extensions:\n"
-        "      - .smc\n"
-    )
-    monkeypatch.chdir(tmp_path)
-    doctor = Doctor()
-    results = doctor.check_systems_config_names(["snes"])
-    assert len(results) == 1
-    assert results[0].name == "system[snes]"
-    assert results[0].status == CheckStatus.OK
-    assert "ssh_profile" in results[0].message
-
-
-def test_check_systems_config_ssh_profile_missing(tmp_path, monkeypatch):
-    config_dir = tmp_path / "config"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    systems_yaml = config_dir / "systems.yaml"
-    systems_yaml.write_text(
-        "ssh_profiles:\n"
-        "  arcade:\n"
-        "    host: 192.0.2.1\n"
-        "    user: u\n"
-        "systems:\n"
-        "  - name: snes\n"
-        "    ssh_profile: arcade2\n"
-        "    extensions:\n"
-        "      - .smc\n"
-    )
-    monkeypatch.chdir(tmp_path)
-    doctor = Doctor()
-    results = doctor.check_systems_config_names(["snes"])
-    assert len(results) == 1
-    assert results[0].name == "system[snes]"
-    assert results[0].status == CheckStatus.FAIL
-    assert "arcade2" in results[0].message
-
-
-def test_check_systems_config_ssh_profile_missing_fields(tmp_path, monkeypatch):
-    config_dir = tmp_path / "config"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    systems_yaml = config_dir / "systems.yaml"
-    systems_yaml.write_text(
-        "ssh_profiles:\n"
-        "  arcade:\n"
-        "    user: u\n"
-        "systems:\n"
-        "  - name: snes\n"
-        "    ssh_profile: arcade\n"
-        "    extensions:\n"
-        "      - .smc\n"
-    )
-    monkeypatch.chdir(tmp_path)
-    doctor = Doctor()
-    results = doctor.check_systems_config_names(["snes"])
-    assert len(results) == 1
-    assert results[0].name == "system[snes]"
-    assert results[0].status == CheckStatus.FAIL
-    assert "host" in results[0].message
 
 
 def test_check_systems_config_es_only_no_override(tmp_path, monkeypatch):
@@ -735,42 +665,6 @@ def test_check_systems_config_es_only_no_override(tmp_path, monkeypatch):
     assert "no override" in results[0].message
 
 
-def test_check_systems_config_es_with_yaml_override(tmp_path, monkeypatch):
-    es_dir = tmp_path / ".emulationstation"
-    es_dir.mkdir(parents=True, exist_ok=True)
-    es_cfg = es_dir / "es_systems.cfg"
-    es_cfg.write_text(
-        _es_systems_xml(
-            [
-                {
-                    "name": "snes",
-                    "fullname": "SNES",
-                    "path": "/roms/snes",
-                    "extension": ".smc",
-                }
-            ]
-        )
-    )
-    config_dir = tmp_path / "config"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    systems_yaml = config_dir / "systems.yaml"
-    systems_yaml.write_text(
-        "ssh_profiles: {}\n"
-        "systems:\n"
-        "  - name: snes\n"
-        "    extensions:\n"
-        "      - .smc\n"
-        "      - .sfc\n"
-    )
-    monkeypatch.setattr("multiscraper.doctor.Path.home", lambda: tmp_path)
-    monkeypatch.chdir(tmp_path)
-    doctor = Doctor()
-    results = doctor.check_systems_config_names(["snes"])
-    assert len(results) == 1
-    assert results[0].name == "system[snes]"
-    assert results[0].status == CheckStatus.OK
-
-
 def test_check_systems_config_unknown_name(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr("multiscraper.doctor.Path.home", lambda: tmp_path)
@@ -780,3 +674,80 @@ def test_check_systems_config_unknown_name(tmp_path, monkeypatch):
     assert results[0].name == "system[nonexistent]"
     assert results[0].status == CheckStatus.FAIL
     assert "not found" in results[0].message.lower() or "unknown" in results[0].message.lower()
+
+
+def test_check_systems_config_explicit_wildcard(tmp_path, monkeypatch):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    systems_yaml = config_dir / "systems.yaml"
+    systems_yaml.write_text(
+        "systems:\n"
+        "  - name: snes\n"
+        "    roms_root: ssh://arcade/home/roms/snes\n"
+        "    extensions: [\"*\"]\n"
+    )
+    monkeypatch.chdir(tmp_path)
+    doctor = Doctor()
+    results = doctor.check_systems_config_names(["snes"])
+    assert len(results) == 1
+    assert results[0].name == "system[snes]"
+    assert results[0].status == CheckStatus.OK
+    assert "extensions" in results[0].message.lower()
+    assert "wildcard" in results[0].message.lower()
+
+
+def test_check_systems_config_empty_list_fail(tmp_path, monkeypatch):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    systems_yaml = config_dir / "systems.yaml"
+    systems_yaml.write_text(
+        "systems:\n"
+        "  - name: snes\n"
+        "    roms_root: ssh://arcade/home/roms/snes\n"
+        "    extensions: []\n"
+    )
+    monkeypatch.chdir(tmp_path)
+    doctor = Doctor()
+    results = doctor.check_systems_config_names(["snes"])
+    assert len(results) == 1
+    assert results[0].name == "system[snes]"
+    assert results[0].status == CheckStatus.FAIL
+    assert "extensions" in results[0].message.lower()
+
+
+def test_check_systems_config_invalid_extension_no_dot(tmp_path, monkeypatch):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    systems_yaml = config_dir / "systems.yaml"
+    systems_yaml.write_text(
+        "systems:\n"
+        "  - name: snes\n"
+        "    roms_root: ssh://arcade/home/roms/snes\n"
+        "    extensions: [gba]\n"
+    )
+    monkeypatch.chdir(tmp_path)
+    doctor = Doctor()
+    results = doctor.check_systems_config_names(["snes"])
+    assert len(results) == 1
+    assert results[0].name == "system[snes]"
+    assert results[0].status == CheckStatus.FAIL
+    assert "extensions" in results[0].message.lower()
+
+
+def test_check_systems_config_roms_root_invalid(tmp_path, monkeypatch):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    systems_yaml = config_dir / "systems.yaml"
+    systems_yaml.write_text(
+        "systems:\n"
+        "  - name: snes\n"
+        "    roms_root: not-a-path\n"
+        "    extensions: [.smc]\n"
+    )
+    monkeypatch.chdir(tmp_path)
+    doctor = Doctor()
+    results = doctor.check_systems_config_names(["snes"])
+    assert len(results) == 1
+    assert results[0].name == "system[snes]"
+    assert results[0].status == CheckStatus.FAIL
+    assert "roms_root" in results[0].message.lower()

@@ -168,14 +168,47 @@ class Doctor:
 
     _SYSTEM_NAME_PATTERN = re.compile(r"^[a-z0-9_]{1,32}$")
     _EXT_PATTERN = re.compile(r"^\.[a-z0-9]{1,8}$")
+    _ROMS_ROOT_SSH_PATTERN = re.compile(r"^ssh://[\w@.:-]+")
+    _ROMS_ROOT_LOCAL_PATTERN = re.compile(r"^(/[^/].*|~/.*|\./.*|\.\./.*)$")
 
     def _validate_system_name(self, name: str) -> bool:
         return bool(self._SYSTEM_NAME_PATTERN.match(name))
 
-    def _validate_extensions(self, exts: list[str]) -> bool:
+    def _is_wildcard(self, item: str) -> bool:
+        return item == "*"
+
+    def _is_valid_extension(self, item: str) -> bool:
+        return bool(self._EXT_PATTERN.match(item))
+
+    def _validate_extensions(self, exts: object) -> tuple[CheckStatus, str]:
+        if not isinstance(exts, list):
+            return CheckStatus.FAIL, "extensions: must be a list"
         if not exts:
-            return False
-        return all(self._EXT_PATTERN.match(e) for e in exts)
+            return (
+                CheckStatus.FAIL,
+                "extensions: empty (use [*] for wildcard or list of extensions)",
+            )
+        if all(self._is_wildcard(str(x)) for x in exts):
+            return CheckStatus.OK, "extensions: wildcard [*]"
+        bad = [str(x) for x in exts if not self._is_valid_extension(str(x))]
+        if bad:
+            detail = ", ".join(f"'{b}'" for b in bad)
+            return (
+                CheckStatus.FAIL,
+                f"extensions: invalid items: {detail}",
+            )
+        return CheckStatus.OK, f"extensions: {', '.join(str(x) for x in exts)} valid"
+
+    def _validate_roms_root(self, path: object) -> tuple[CheckStatus, str]:
+        if not isinstance(path, str) or not path:
+            return CheckStatus.FAIL, "roms_root: missing"
+        if self._ROMS_ROOT_SSH_PATTERN.match(path):
+            return CheckStatus.OK, "roms_root: ssh:// valid"
+        if self._ROMS_ROOT_LOCAL_PATTERN.match(path):
+            if path.startswith("~"):
+                return CheckStatus.OK, "roms_root: local path with ~"
+            return CheckStatus.OK, "roms_root: local path"
+        return CheckStatus.FAIL, f"roms_root: invalid format '{path}'"
 
     def _load_es_systems_index(
         self,
@@ -197,34 +230,29 @@ class Doctor:
 
     def _load_systems_yaml(
         self, config_path: Path | None = None
-    ) -> tuple[dict[str, dict[str, object]], dict[str, dict[str, object]]]:
+    ) -> dict[str, dict[str, object]]:
         from typing import cast
 
         import yaml
 
         path = config_path or Path("config/systems.yaml")
         if not path.exists():
-            return {}, {}
+            return {}
         try:
             raw = yaml.safe_load(path.read_text(encoding="utf-8"))
         except Exception:
-            return {}, {}
+            return {}
         if not isinstance(raw, dict):
-            return {}, {}
+            return {}
         systems_obj = raw.get("systems", [])
         systems_list = cast(list[dict[str, object]], systems_obj) if isinstance(
             systems_obj, list
         ) else []
-        profiles_obj = raw.get("ssh_profiles", {})
-        profiles = cast(
-            dict[str, dict[str, object]], profiles_obj
-        ) if isinstance(profiles_obj, dict) else {}
-        systems_by_name = {
+        return {
             str(s.get("name")): s
             for s in systems_list
             if isinstance(s, dict) and isinstance(s.get("name"), str)
         }
-        return systems_by_name, profiles
 
     def check_systems_config_names(
         self, names: list[str]
@@ -233,14 +261,16 @@ class Doctor:
 
         Looks up each name in both es_systems.cfg (auto-discovered) and
         config/systems.yaml. Sub-checks expressed in a single
-        CheckResult.message: resolvable, source mixing, extensions valid,
-        name format, ssh_profile consistency and required fields.
+        CheckResult.message: resolvable, source mixing, name format,
+        extensions valid, roms_root format valid. Transport is
+        inferred from `roms_root`, so no per-system `ssh_profile` is
+        consulted.
         """
         results: list[CheckResult] = []
         if not names:
             return results
         es_index = self._load_es_systems_index()
-        yaml_systems, yaml_profiles = self._load_systems_yaml()
+        yaml_systems = self._load_systems_yaml()
         for raw_name in names:
             name = str(raw_name)
             es_entry = es_index.get(name)
@@ -269,44 +299,30 @@ class Doctor:
             if not self._validate_system_name(name):
                 parts.append(f"name='{name}' (invalid format)")
                 status = CheckStatus.FAIL
-            exts: list[str] = []
-            if yaml_entry is not None and isinstance(yaml_entry.get("extensions"), list):
-                yaml_exts = yaml_entry.get("extensions")
-                if isinstance(yaml_exts, list):
-                    exts = [str(e) for e in yaml_exts if isinstance(e, str)]
-            if not exts and es_entry is not None:
-                exts = es_entry[1]
-            if not self._validate_extensions(exts):
-                parts.append("ext invalid or empty")
+            ext_value: object = []
+            has_yaml_exts = False
+            if yaml_entry is not None and "extensions" in yaml_entry:
+                ext_value = yaml_entry.get("extensions")
+                has_yaml_exts = True
+            elif es_entry is not None:
+                ext_value = list(es_entry[1])
+            ext_status, ext_msg = self._validate_extensions(ext_value)
+            parts.append(ext_msg)
+            if ext_status == CheckStatus.FAIL and has_yaml_exts:
                 status = CheckStatus.FAIL
-            else:
-                parts.append(f"ext={'/'.join(exts)} valid")
-            ssh_profile_name: str | None = None
-            if yaml_entry is not None and isinstance(yaml_entry.get("ssh_profile"), str):
-                ssh_profile_name = str(yaml_entry["ssh_profile"])
-            elif es_entry is not None and not yaml_entry:
-                ssh_profile_name = None
-            if ssh_profile_name:
-                profile = yaml_profiles.get(ssh_profile_name)
-                if profile is None:
-                    parts.append(
-                        f"ssh_profile='{ssh_profile_name}' missing from ssh_profiles"
-                    )
-                    status = CheckStatus.FAIL
-                else:
-                    host = profile.get("host")
-                    user = profile.get("user")
-                    if not (isinstance(host, str) and host) or not (
-                        isinstance(user, str) and user
-                    ):
-                        parts.append(
-                            f"ssh_profile='{ssh_profile_name}' missing host/user"
-                        )
-                        status = CheckStatus.FAIL
-                    else:
-                        parts.append(f"ssh_profile={ssh_profile_name} valid")
-            else:
-                parts.append("no ssh_profile")
+            elif ext_status == CheckStatus.FAIL and not has_yaml_exts:
+                if not ext_value:
+                    parts.append("extensions: missing (use [*] or list of extensions)")
+                status = CheckStatus.FAIL
+            roms_root_value: object = None
+            if yaml_entry is not None and "roms_root" in yaml_entry:
+                roms_root_value = yaml_entry.get("roms_root")
+            elif es_entry is not None:
+                roms_root_value = es_entry[0]
+            rr_status, rr_msg = self._validate_roms_root(roms_root_value)
+            parts.append(rr_msg)
+            if rr_status == CheckStatus.FAIL:
+                status = CheckStatus.FAIL
             results.append(
                 CheckResult(
                     name=f"system[{name}]",

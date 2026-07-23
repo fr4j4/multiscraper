@@ -197,6 +197,34 @@ multiscraper doctor
 
 Exits `0` if every check passed, `1` otherwise.
 
+### `multiscraper doctor --systems`
+
+When `--systems` is given (comma-separated list), each name is
+validated against `es_systems.cfg` (auto-discovered) and
+`config/systems.yaml`. Per system, the check reports:
+
+- `source` — where the system was found (`es_systems`, `systems.yaml`,
+  or both).
+- `name` — `^[a-z0-9_]{1,32}$` enforced.
+- `extensions` — **required**. Valid forms:
+  - `["*"]` (wildcard; YAML must quote `*` to avoid alias
+    interpretation) — `OK`.
+  - `[.ext, .ext]` — `OK`.
+  - Missing, empty, or items without a leading `.` — `FAIL`.
+  If `extensions` is absent from the YAML entry, the value is
+  inherited from the matching `es_systems.cfg` row.
+- `roms_root` — format-validated. `ssh://<profile>/...`,
+  `ssh://<user>@<host>:<port>/...`, `/abs/path`, `~/rel`, `./rel`,
+  `../rel` are accepted. Anything else is `FAIL`. The transport is
+  inferred from the scheme, so no per-system `ssh_profile` is
+  required.
+
+Example:
+
+```
+multiscraper doctor --systems snes,gba,nes
+```
+
 ## Logging flags
 
 `-v`, `-vv`, `-q` are surfaced on every command. The mapping is in
