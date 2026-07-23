@@ -167,7 +167,7 @@ class Doctor:
         )
 
     _SYSTEM_NAME_PATTERN = re.compile(r"^[a-z0-9_]{1,32}$")
-    _EXT_PATTERN = re.compile(r"^\.[a-z0-9]{1,8}$")
+    _EXT_PATTERN = re.compile(r"^\.?[a-z0-9]{1,8}$")
     _ROMS_ROOT_SSH_PATTERN = re.compile(r"^ssh://[\w@.:-]+")
     _ROMS_ROOT_LOCAL_PATTERN = re.compile(r"^(/[^/].*|~/.*|\./.*|\.\./.*)$")
 
@@ -179,6 +179,9 @@ class Doctor:
 
     def _is_valid_extension(self, item: str) -> bool:
         return bool(self._EXT_PATTERN.match(item))
+
+    def _normalize_extension(self, item: str) -> str:
+        return item if item.startswith(".") else f".{item}"
 
     def _validate_extensions(self, exts: object) -> tuple[CheckStatus, str]:
         if not isinstance(exts, list):
@@ -197,7 +200,8 @@ class Doctor:
                 CheckStatus.FAIL,
                 f"extensions: invalid items: {detail}",
             )
-        return CheckStatus.OK, f"extensions: {', '.join(str(x) for x in exts)} valid"
+        normalized = [self._normalize_extension(str(x)) for x in exts]
+        return CheckStatus.OK, f"extensions: {', '.join(normalized)} valid"
 
     def _validate_roms_root(self, path: object) -> tuple[CheckStatus, str]:
         if not isinstance(path, str) or not path:

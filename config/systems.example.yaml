@@ -2,7 +2,8 @@
 # If es_systems.cfg exists, it takes precedence; this file overrides.
 #
 # Each system requires:
-#   - extensions: REQUIRED. Use ["*"] for wildcard, or a list like [".smc", ".sfc"].
+#   - extensions: REQUIRED. Use ["*"] for wildcard, or a list like ["smc", "sfc"].
+#                 Leading dot is optional: "gba" and ".gba" are equivalent.
 #   - roms_root:  transport is inferred from the scheme.
 #                 ssh://<profile>/path  or  ssh://<user>@<host>:<port>/path  for remote
 #                 /absolute/path, ~/relative/path, ./relative, ../parent  for local
@@ -22,10 +23,10 @@ ssh_profiles:
     # auto_trust: true
 
 systems:
-  # Case 1: explicit extension list
+  # Case 1: explicit extension list (dots optional)
   - name: snes
     roms_root: ssh://arcade/home/arcade/ROMs/snes
-    extensions: [.smc, .sfc]
+    extensions: [smc, sfc]
 
   # Case 2: explicit wildcard
   - name: gba
@@ -35,7 +36,7 @@ systems:
   # Case 3: local path
   - name: nes
     roms_root: ~/ROMs/nes
-    extensions: [.nes]
+    extensions: [nes]
 
 # Override es_systems.cfg path (auto-discovered by default)
 # es_systems_path: ~/.emulationstation/es_systems.cfg

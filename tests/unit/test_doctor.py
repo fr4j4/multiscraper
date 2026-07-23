@@ -715,7 +715,7 @@ def test_check_systems_config_empty_list_fail(tmp_path, monkeypatch):
     assert "extensions" in results[0].message.lower()
 
 
-def test_check_systems_config_invalid_extension_no_dot(tmp_path, monkeypatch):
+def test_check_systems_config_extension_without_dot_ok(tmp_path, monkeypatch):
     config_dir = tmp_path / "config"
     config_dir.mkdir(parents=True, exist_ok=True)
     systems_yaml = config_dir / "systems.yaml"
@@ -730,8 +730,45 @@ def test_check_systems_config_invalid_extension_no_dot(tmp_path, monkeypatch):
     results = doctor.check_systems_config_names(["snes"])
     assert len(results) == 1
     assert results[0].name == "system[snes]"
+    assert results[0].status == CheckStatus.OK
+    assert ".gba" in results[0].message
+
+
+def test_check_systems_config_mixed_dot_and_no_dot(tmp_path, monkeypatch):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    systems_yaml = config_dir / "systems.yaml"
+    systems_yaml.write_text(
+        "systems:\n"
+        "  - name: snes\n"
+        "    roms_root: ssh://arcade/home/roms/snes\n"
+        "    extensions: [gba, .gb]\n"
+    )
+    monkeypatch.chdir(tmp_path)
+    doctor = Doctor()
+    results = doctor.check_systems_config_names(["snes"])
+    assert len(results) == 1
+    assert results[0].status == CheckStatus.OK
+    assert ".gba" in results[0].message
+    assert ".gb" in results[0].message
+
+
+def test_check_systems_config_extension_invalid_chars(tmp_path, monkeypatch):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    systems_yaml = config_dir / "systems.yaml"
+    systems_yaml.write_text(
+        "systems:\n"
+        "  - name: snes\n"
+        "    roms_root: ssh://arcade/home/roms/snes\n"
+        "    extensions: [BAD-EXT!]\n"
+    )
+    monkeypatch.chdir(tmp_path)
+    doctor = Doctor()
+    results = doctor.check_systems_config_names(["snes"])
+    assert len(results) == 1
     assert results[0].status == CheckStatus.FAIL
-    assert "extensions" in results[0].message.lower()
+    assert "invalid" in results[0].message.lower()
 
 
 def test_check_systems_config_roms_root_invalid(tmp_path, monkeypatch):
