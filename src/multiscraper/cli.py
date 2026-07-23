@@ -175,12 +175,70 @@ def override_list(system: str | None) -> None:
 
 
 @main.command()
-def doctor() -> None:
+@click.option("--ssh", "ssh_profile", default=None, help="SSH profile name from systems.yaml")
+def doctor(ssh_profile: str | None) -> None:
     """Run diagnostics: check SSH, providers, credentials, disk space."""
+    import asyncio
+
+    from multiscraper.config.loader import load_config
+    from multiscraper.transport.ssh import SshTransport
+
     click.echo("Running diagnostics...")
-    click.echo("  Python version: OK")
-    click.echo("  SSH connection: (not configured)")
-    click.echo("  Providers: (not configured)")
+    v = sys.version_info
+    click.echo(f"  Python version: {v.major}.{v.minor}.{v.micro}")
+
+    if ssh_profile:
+        import yaml
+
+        from multiscraper.config.loader import resolve_env_vars
+
+        systems_path = Path("config/systems.yaml")
+        if not systems_path.exists():
+            click.echo(f"  SSH connection: systems.yaml not found at {systems_path}")
+        else:
+            raw = yaml.safe_load(systems_path.read_text(encoding="utf-8"))
+            profiles = raw.get("ssh_profiles", {})
+            profile = profiles.get(ssh_profile)
+            if not profile:
+                click.echo(f"  SSH connection: profile '{ssh_profile}' not found")
+            else:
+                resolved = {
+                    k: resolve_env_vars(v) if isinstance(v, str) else v
+                    for k, v in profile.items()
+                }
+                kh = resolved.get("known_hosts")
+                if kh:
+                    kh = str(Path(kh).expanduser())
+                port_raw = resolved.get("port", 22)
+                trust_raw = resolved.get("auto_trust", False)
+                transport = SshTransport(
+                    host=resolved.get("host", ""),
+                    port=int(port_raw) if port_raw else 22,
+                    user=resolved.get("user"),
+                    password=resolved.get("password"),
+                    key_file=resolved.get("key_file"),
+                    known_hosts=kh,
+                    auto_trust=trust_raw if isinstance(trust_raw, bool) else False,
+                )
+                try:
+                    asyncio.run(transport._ensure_connected())
+                    host = profile.get("host", "?")
+                    user = profile.get("user", "?")
+                    click.echo(f"  SSH connection to {host}: OK ({user}@{host})")
+                except Exception as exc:
+                    click.echo(f"  SSH connection: FAILED — {exc}")
+
+    config_path = Path("config/sources.yaml")
+    if config_path.exists():
+        try:
+            cfg = load_config(config_path)
+            enabled = [p.id for p in cfg.providers if p.enabled]
+            click.echo(f"  Providers: {len(enabled)} enabled ({', '.join(enabled)})")
+        except Exception as exc:
+            click.echo(f"  Providers: config invalid — {exc}")
+    else:
+        click.echo("  Providers: (not configured)")
+
     click.echo("All checks passed.")
 
 

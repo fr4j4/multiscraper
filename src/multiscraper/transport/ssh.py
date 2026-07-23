@@ -54,7 +54,7 @@ class SshTransport:
             port=self._port,
             username=self._user,
             password=self._password,
-            client_keys=self._key_file,
+            client_keys=[] if self._key_file is None else self._key_file,
             known_hosts=kh,
         )
         return self._conn
