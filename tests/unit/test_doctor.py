@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
 from aioresponses import aioresponses
 
 from multiscraper.config.models import ProviderEntry
@@ -154,7 +152,10 @@ def test_check_provider_credentials_missing(monkeypatch):
     entry = ProviderEntry(
         id="screenscraper",
         enabled=True,
-        config={"devid": "${env:SCREENSCRAPER_DEV_ID}", "devpassword": "${env:SCREENSCRAPER_DEV_PASSWORD}"},
+        config={
+            "devid": "${env:SCREENSCRAPER_DEV_ID}",
+            "devpassword": "${env:SCREENSCRAPER_DEV_PASSWORD}",
+        },
     )
     doctor = Doctor()
     result = doctor.check_provider_credentials([entry])
@@ -169,7 +170,10 @@ def test_check_provider_credentials_ok(monkeypatch):
     entry = ProviderEntry(
         id="screenscraper",
         enabled=True,
-        config={"devid": "${env:SCREENSCRAPER_DEV_ID}", "devpassword": "${env:SCREENSCRAPER_DEV_PASSWORD}"},
+        config={
+            "devid": "${env:SCREENSCRAPER_DEV_ID}",
+            "devpassword": "${env:SCREENSCRAPER_DEV_PASSWORD}",
+        },
     )
     doctor = Doctor()
     result = doctor.check_provider_credentials([entry])
@@ -213,7 +217,8 @@ def test_run_doctor_with_ssh_profile(tmp_path, monkeypatch):
         "providers:\n  - id: local_override\n    enabled: true\n"
     )
     (tmp_path / "config" / "systems.yaml").write_text(
-        "ssh_profiles:\n  arcade:\n    host: 192.0.2.1\n    user: u\n    password: ${env:ARCADE_PASS}\n"
+        "ssh_profiles:\n  arcade:\n    host: 192.0.2.1\n    user: u\n"
+        "    password: ${env:ARCADE_PASS}\n"
     )
     with patch("multiscraper.doctor.SshTransport") as mock:
         instance = MagicMock()
