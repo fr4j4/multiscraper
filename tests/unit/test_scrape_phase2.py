@@ -1,9 +1,9 @@
-"""Phase 2 tests: cascade multi-provider, media download, hash, Orchestrator.
+"""Phase 2 tests: cascade multi-provider, media download, Orchestrator.
 
 These tests exercise the real Orchestrator path and verify:
-- _make_rom computes a hash (crc32 by default)
 - The CLI does not override YAML's timeout_sec / rate_limit_per_sec
 - Media files are saved to media_root/<system>/...
+- The skeleton wires discovery + orchestrator.
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ from pydantic import HttpUrl
 
 from multiscraper.cli import build_sources_config
 from multiscraper.config.models import MultiscraperConfig
+from multiscraper.core.discovery import discover_system
 from multiscraper.models import (
     Candidate,
     MediaRef,
@@ -27,11 +28,7 @@ from multiscraper.models import (
 )
 from multiscraper.output.db import Database
 from multiscraper.providers.registry import ProviderRegistry
-from multiscraper.scrape import (
-    SkeletonSummary,
-    _make_rom,
-    run_scrape_skeleton,
-)
+from multiscraper.scrape import SkeletonSummary, run_scrape_skeleton
 from multiscraper.transport.local import LocalTransport
 
 
@@ -128,30 +125,47 @@ def _expected_crc32(data: bytes) -> str:
 
 
 @pytest.mark.asyncio
-async def test_scrape_computes_hash(tmp_path: Path) -> None:
-    """_make_rom must populate rom.rom_id.crc32 from the file contents."""
+async def test_discovery_populates_db(tmp_path: Path) -> None:
+    """discover_system must populate discovered_roms and compute hashes."""
+    from multiscraper.config.models import System
+
     roms_dir = tmp_path / "roms"
     roms_dir.mkdir()
     content = b"ROM-CONTENT-1234"
     (roms_dir / "game.gba").write_bytes(content)
 
+    db = Database(str(tmp_path / "cache.db"))
+    await db.init()
+    run_id = await db.create_run(config_json={})
+
+    system = System(name="gba", full_path=str(roms_dir), extensions=["gba"])
     transport = LocalTransport()
-    rom = await _make_rom(
+    stats = await discover_system(
+        db=db,
         transport=transport,
-        system="gba",
+        run_id=run_id,
+        system=system,
         system_path=str(roms_dir),
-        filename="game.gba",
         hash_algo="crc32",
+        concurrency=2,
     )
     await transport.close()
 
-    assert rom.rom_id.crc32 == _expected_crc32(content)
-    assert rom.rom_id.cache_key.endswith(_expected_crc32(content))
+    assert stats.listed == 1
+    assert stats.hashed == 1
+    assert stats.hash_failed == 0
+    ready = await db.count_discovered(run_id, system="gba", hash_status="done")
+    assert ready == 1
+
+    row = await db.claim_one_discovered(run_id, "gba")
+    assert row is not None
+    assert row["crc32"] == _expected_crc32(content)
+    await db.close()
 
 
 @pytest.mark.asyncio
 async def test_scrape_uses_orchestrator(tmp_path: Path) -> None:
-    """run_scrape_skeleton must delegate to Orchestrator.start()."""
+    """run_scrape_skeleton must populate discovered_roms and call Orchestrator.start."""
     roms_dir = tmp_path / "roms"
     roms_dir.mkdir()
     (roms_dir / "game.gba").write_bytes(b"ROM-CONTENT-1234")
@@ -173,19 +187,12 @@ async def test_scrape_uses_orchestrator(tmp_path: Path) -> None:
     registry.register(FakeMediaProvider())
     sources_cfg = MultiscraperConfig()
 
-    database = Database(str(db_path))
-    await database.init()
-    await database.create_run(config_json={})
-    await database.close()
-
-    with patch(
-        "multiscraper.scrape.Orchestrator"
-    ) as MockOrchestrator:
+    with patch("multiscraper.scrape.Orchestrator") as MockOrchestrator:
         mock_instance = MockOrchestrator.return_value
-        mock_instance.start = AsyncMock(return_value="01TESTRUNID0000000000")
+        mock_instance.start = AsyncMock(return_value=None)
         mock_instance.close = AsyncMock(return_value=None)
 
-        summary = await run_scrape_skeleton(
+        await run_scrape_skeleton(
             config_dir=cfg_dir,
             db_path=db_path,
             csv_dir=csv_path,
@@ -196,12 +203,9 @@ async def test_scrape_uses_orchestrator(tmp_path: Path) -> None:
             sources_config=sources_cfg,
         )
 
-    assert isinstance(summary, SkeletonSummary)
     mock_instance.start.assert_awaited_once()
     args, _ = mock_instance.start.call_args
-    roms_arg, systems_arg = args
-    assert len(roms_arg) == 1
-    assert roms_arg[0].raw_name == "game.gba"
+    systems_arg = args[0]
     assert systems_arg == ["gba"]
 
 

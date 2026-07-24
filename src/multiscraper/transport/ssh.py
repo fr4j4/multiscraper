@@ -6,6 +6,7 @@ Supports key-based auth, password auth, SSH agent, and ProxyJump.
 
 from __future__ import annotations
 
+import asyncio
 import shlex
 from collections.abc import AsyncIterator
 from typing import Literal, cast
@@ -28,6 +29,7 @@ class SshTransport:
         known_hosts: str | None = None,
         auto_trust: bool = False,
         jump_host: str | None = None,
+        hash_semaphore: asyncio.Semaphore | None = None,
     ):
         self._host = host
         self._port = port
@@ -37,6 +39,7 @@ class SshTransport:
         self._known_hosts = known_hosts
         self._auto_trust = auto_trust
         self._jump_host = jump_host
+        self._hash_semaphore = hash_semaphore
         self._conn: asyncssh.SSHClientConnection | None = None
 
     async def _ensure_connected(self) -> asyncssh.SSHClientConnection:
@@ -81,6 +84,12 @@ class SshTransport:
         )
 
     async def hash(self, path: str, algo: Literal["crc32", "sha1"]) -> str:
+        if self._hash_semaphore is None:
+            return await self._hash_impl(path, algo)
+        async with self._hash_semaphore:
+            return await self._hash_impl(path, algo)
+
+    async def _hash_impl(self, path: str, algo: Literal["crc32", "sha1"]) -> str:
         import zlib
 
         if algo == "crc32":

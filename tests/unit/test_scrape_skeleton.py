@@ -7,10 +7,8 @@ the public behavior (extension filter, --limit, no-match) works.
 
 from __future__ import annotations
 
-import asyncio
 import csv
 import sqlite3
-import zlib
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -21,14 +19,16 @@ from pydantic import HttpUrl
 
 from multiscraper.cli import main
 from multiscraper.config.models import MultiscraperConfig, ProviderDefaults
+from multiscraper.core.discovery import discover_system
 from multiscraper.models import (
     Candidate,
     MediaRef,
     MediaType,
     Rom,
 )
+from multiscraper.output.db import Database
 from multiscraper.providers.registry import ProviderRegistry
-from multiscraper.scrape import SkeletonSummary, _make_rom, run_scrape_skeleton
+from multiscraper.scrape import SkeletonSummary, run_scrape_skeleton
 from multiscraper.transport.local import LocalTransport
 
 
@@ -436,28 +436,36 @@ async def test_scrape_handles_transport_error(tmp_path: Path) -> None:
     assert len(provider.searches) == 0
 
 
-def test_scrape_computes_hash(tmp_path: Path) -> None:
-    """_make_rom must populate rom.rom_id.crc32 from the file contents."""
+@pytest.mark.asyncio
+async def test_scrape_computes_hash(tmp_path: Path) -> None:
+    """discover_system must populate crc32 on the discovered row."""
+    from multiscraper.config.models import System
+    import zlib
+
     roms_dir = tmp_path / "roms"
     roms_dir.mkdir()
     content = b"ROM-CONTENT-1234"
     (roms_dir / "game.gba").write_bytes(content)
 
+    db = Database(str(tmp_path / "cache.db"))
+    await db.init()
+    run_id = await db.create_run(config_json={})
+    system = System(name="gba", full_path=str(roms_dir), extensions=["gba"])
     transport = LocalTransport()
-    rom = asyncio.run(
-        _make_rom(
-            transport=transport,
-            system="gba",
-            system_path=str(roms_dir),
-            filename="game.gba",
-            hash_algo="crc32",
-        )
+    await discover_system(
+        db=db,
+        transport=transport,
+        run_id=run_id,
+        system=system,
+        system_path=str(roms_dir),
+        hash_algo="crc32",
     )
-    asyncio.run(transport.close())
-
+    await transport.close()
+    row = await db.claim_one_discovered(run_id, "gba")
+    assert row is not None
     expected = f"{zlib.crc32(content) & 0xFFFFFFFF:08x}"
-    assert rom.rom_id.crc32 == expected
-    assert rom.rom_id.cache_key.endswith(expected)
+    assert row["crc32"] == expected
+    await db.close()
 
 
 def test_cli_scrape_dry_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

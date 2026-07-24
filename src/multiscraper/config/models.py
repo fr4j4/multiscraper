@@ -59,6 +59,9 @@ class OrchestratorConfig(BaseModel):
     shutdown_drain_timeout_sec: int = 180
     csv_flush_every: int = 50
     progress_interval_sec: float = 0.5
+    discovery_concurrency_ssh: int = 8
+    discovery_concurrency_local: int = 32
+    discovery_poll_interval_sec: float = 0.5
 
 
 class MultiscraperConfig(BaseModel):

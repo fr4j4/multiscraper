@@ -87,24 +87,6 @@ class FakeProvider:
 @pytest.mark.asyncio
 async def test_e2e_full_pipeline(tmp_path: Path) -> None:
     """Full pipeline: ROMs → cascade → CSV → DB → gamelist.xml."""
-    roms: list[Rom] = []
-    for i in range(10):
-        ri = RomIdentifier(
-            rel_path=f"./snes/game{i}.smc",
-            size=1024,
-            mtime=1700000000,
-            crc32=f"crc{i:08x}",
-            cache_key=f"key{i}",
-        )
-        roms.append(
-            Rom(
-                system="snes",
-                rom_id=ri,
-                raw_name=f"game{i}.smc",
-                normalized_name=f"Game {i}",
-            )
-        )
-
     reg = ProviderRegistry()
     reg.register(FakeProvider())
 
@@ -114,10 +96,38 @@ async def test_e2e_full_pipeline(tmp_path: Path) -> None:
     csv_path = tmp_path / "run.csv"
     media_root = tmp_path / "media"
 
+    db = Database(str(db_path))
+    await db.init()
+    run_id = await db.create_run(config_json={})
+    entries: list[dict[str, object]] = []
+    for i in range(10):
+        entries.append({
+            "rel_path": f"./snes/game{i}.smc",
+            "raw_name": f"game{i}.smc",
+            "normalized_name": f"Game {i}",
+            "size": 1024,
+            "mtime": 1700000000,
+            "crc32": f"crc{i:08x}",
+            "sha1": None,
+            "cache_key": f"snes:game{i}.smc:crc{i:08x}",
+        })
+    await db.insert_discovered_pending(run_id, "snes", entries)
+    for i in range(10):
+        rid = await db.find_pending_discovered_id(
+            run_id, "snes", f"./snes/game{i}.smc",
+        )
+        assert rid is not None
+        await db.update_discovered_hash(
+            rid, size=1024, mtime=1700000000,
+            crc32=f"crc{i:08x}", sha1=None,
+            cache_key=f"snes:game{i}.smc:crc{i:08x}", status="done",
+        )
+
     orch = Orchestrator(
         registry=reg,
         config=config,
-        db_path=str(db_path),
+        db=db,
+        run_id=run_id,
         csv_path=csv_path,
         media_root=media_root,
         orchestrator=OrchestratorConfig(
@@ -127,7 +137,10 @@ async def test_e2e_full_pipeline(tmp_path: Path) -> None:
         ),
     )
 
-    run_id = await orch.start(roms=roms, systems=["snes"])
+    import asyncio
+    discovery_done = asyncio.Event()
+    discovery_done.set()
+    await orch.start(systems=["snes"], discovery_done=discovery_done)
     assert run_id
     await orch.close()
 
@@ -137,10 +150,9 @@ async def test_e2e_full_pipeline(tmp_path: Path) -> None:
     assert len(lines) == 11
     assert "OK" in csv_content or "PARTIAL" in csv_content
 
-    db = Database(str(db_path))
-    await db.init()
     tables = await db.list_tables()
     assert "runs" in tables
     assert "roms" in tables
     assert "scrape_results" in tables
+    assert "discovered_roms" in tables
     await db.close()

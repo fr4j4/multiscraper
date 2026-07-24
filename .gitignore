@@ -22,3 +22,5 @@ config/sources.yaml
 config/systems.yaml
 config/config.yaml
 .env
+log.jsonl
+run.log.jsonl

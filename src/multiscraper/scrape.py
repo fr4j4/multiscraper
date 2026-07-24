@@ -1,13 +1,14 @@
 """End-to-end skeleton for the `multiscraper scrape` command.
 
 Wires the existing Orchestrator, transport, registry, database, and CSV
-writer into a single function that the CLI calls. Phase 2 delegates
-the actual scrape work to `Orchestrator.start` and adds hash
-computation (crc32/sha1) on ROM discovery.
+writer into a single function that the CLI calls. Discovery and the
+worker pool run concurrently in the same event loop; discovery writes
+to the temporary discovered_roms table and workers claim rows from it.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -21,13 +22,16 @@ from multiscraper.config.loader import (
 )
 from multiscraper.config.models import (
     MultiscraperConfig,
+    OrchestratorConfig,
+    System,
     SystemsConfig,
     Transport,
     TransportsConfig,
 )
+from multiscraper.core.discovery import discover_system
 from multiscraper.core.orchestrator import Orchestrator
-from multiscraper.models import Rom, RomIdentifier
 from multiscraper.output.db import Database
+from multiscraper.providers.base import AllProvidersBlocked
 from multiscraper.providers.registry import ProviderRegistry
 from multiscraper.transport.local import LocalTransport
 from multiscraper.transport.ssh import SshTransport
@@ -49,6 +53,11 @@ class SkeletonSummary:
         errors: Number of ROMs that errored during processing.
         csv_dir: Path to the directory containing per-system CSV reports.
         db_path: Path to the SQLite cache.
+        provider_errors: Counts of cascade-level errors per provider
+            (e.g. 429/430/503 responses, exceptions). Populated by the
+            orchestrator during the run.
+        aborted_reason: Non-empty if the run was aborted, typically
+            because every media provider was blocked (rate-limited).
     """
 
     run_id: str = ""
@@ -60,9 +69,15 @@ class SkeletonSummary:
     errors: int = 0
     csv_dir: str = ""
     db_path: str = ""
+    provider_errors: dict[str, int] = field(default_factory=dict)
+    aborted_reason: str = ""
 
 
-def _build_transport(current: Transport) -> LocalTransport | SshTransport:
+def _build_transport(
+    current: Transport,
+    *,
+    hash_semaphore: asyncio.Semaphore | None = None,
+) -> LocalTransport | SshTransport:
     """Instantiate a transport from a config Transport entry."""
     if current.kind == "local":
         return LocalTransport()
@@ -74,82 +89,14 @@ def _build_transport(current: Transport) -> LocalTransport | SshTransport:
         key_file=current.key_file,
         known_hosts=current.known_hosts,
         auto_trust=current.auto_trust,
-    )
-
-
-async def _list_rom_files(
-    transport: LocalTransport | SshTransport, system_path: str, extensions: list[str],
-) -> list[str]:
-    """List ROMs in system_path, filtered by extension.
-
-    Returns an empty list if the directory is missing or transport fails.
-    """
-    try:
-        all_files = await transport.list_dir(system_path)
-    except (FileNotFoundError, OSError) as exc:
-        logger.warning("list_dir_failed path=%s err=%s", system_path, exc)
-        return []
-
-    exts = {e.lower().lstrip(".") for e in extensions}
-    return [
-        f for f in all_files
-        if "." in f and f.rsplit(".", 1)[-1].lower() in exts
-    ]
-
-
-async def _make_rom(
-    transport: LocalTransport | SshTransport,
-    system: str,
-    system_path: str,
-    filename: str,
-    hash_algo: str = "crc32",
-) -> Rom:
-    """Build a Rom object from a transport-discovered file.
-
-    Computes the configured hash (crc32 by default) and stores it in
-    `rom.rom_id.crc32` or `rom.rom_id.sha1` depending on the algo.
-    """
-    full_path = f"{system_path.rstrip('/')}/{filename}"
-    try:
-        info = await transport.file_info(full_path)
-        size = info.size
-        mtime = info.mtime
-    except OSError as exc:
-        logger.warning("file_info_failed path=%s err=%s", full_path, exc)
-        size = 0
-        mtime = 0
-
-    rom_hash = ""
-    if hash_algo not in ("crc32", "sha1"):
-        raise ValueError(f"hash_algo must be 'crc32' or 'sha1', got {hash_algo!r}")
-    try:
-        rom_hash = await transport.hash(full_path, hash_algo)  # type: ignore[arg-type]
-    except Exception as exc:
-        logger.warning("hash_failed path=%s err=%s", full_path, exc)
-
-    raw_name = filename
-    stem = filename.rsplit(".", 1)[0] if "." in filename else filename
-    cache_key = f"{system}:{filename}:{rom_hash}"
-    rom_id = RomIdentifier(
-        rel_path=filename,
-        size=size,
-        mtime=mtime,
-        crc32=rom_hash if hash_algo == "crc32" else None,
-        sha1=rom_hash if hash_algo == "sha1" else None,
-        cache_key=cache_key,
-    )
-    return Rom(
-        system=system,
-        rom_id=rom_id,
-        raw_name=raw_name,
-        normalized_name=stem,
+        hash_semaphore=hash_semaphore,
     )
 
 
 async def _count_results(
     db_path: Path, run_id: str,
-) -> tuple[int, int, int]:
-    """Return (matched, no_match, errors) by querying the DB."""
+) -> tuple[int, int, int, int]:
+    """Return (matched, no_match, errors, skipped) by querying the DB."""
     import sqlite3
 
     conn = sqlite3.connect(str(db_path))
@@ -166,6 +113,7 @@ async def _count_results(
     matched = 0
     no_match = 0
     errors = 0
+    skipped = 0
     for status, count in rows:
         if status in ("OK", "PARTIAL"):
             matched += int(count)
@@ -173,7 +121,9 @@ async def _count_results(
             no_match += int(count)
         elif status in ("ERROR", "TIMED_OUT", "BLOCKED"):
             errors += int(count)
-    return matched, no_match, errors
+        elif status == "SKIPPED":
+            skipped += int(count)
+    return matched, no_match, errors, skipped
 
 
 async def run_scrape_skeleton(
@@ -194,11 +144,10 @@ async def run_scrape_skeleton(
 ) -> SkeletonSummary:
     """Run the end-to-end skeleton scrape.
 
-    Discovers ROMs via the configured transport, builds Rom objects
-    with hashes, skips those already scraped (if skip_existing), and
-    hands the rest to the Orchestrator. The Orchestrator owns the
-    worker pool, cascade, media download, DB persistence, and CSV
-    writing (one CSV per system, in csv_dir).
+    Discovers ROMs via the configured transport (in parallel, writing to
+    the discovered_roms table), starts the Orchestrator so workers
+    consume the table, and aggregates a SkeletonSummary. Discovery and
+    workers run concurrently in the same event loop.
 
     Args:
         config_dir: Directory containing config.yaml, sources.yaml, systems.yaml.
@@ -230,9 +179,6 @@ async def run_scrape_skeleton(
         t for t in transports_cfg.transports
         if t.name == transports_cfg.current_transport
     )
-    built_transport: LocalTransport | SshTransport = (
-        transport or _build_transport(current)
-    )
 
     if systems_filter is not None:
         wanted = set(systems_filter)
@@ -250,67 +196,50 @@ async def run_scrape_skeleton(
     )
     csv_dir.mkdir(parents=True, exist_ok=True)
 
+    is_ssh = current.kind == "ssh"
+    if is_ssh:
+        hash_sem = asyncio.Semaphore(transports_cfg.orchestrator.discovery_concurrency_ssh)
+    else:
+        hash_sem = asyncio.Semaphore(transports_cfg.orchestrator.discovery_concurrency_local)
+    built_transport: LocalTransport | SshTransport = (
+        transport or _build_transport(current, hash_semaphore=hash_sem)
+    )
+
     db = Database(str(db_path))
     await db.init()
+    await db.truncate_discovered_roms()
 
     try:
-        all_roms: list[Rom] = []
-        roms_by_system: dict[str, list[Rom]] = {}
-        skipped = 0
+        run_id = await db.create_run(
+            config_json=sources_config.model_dump(mode="json"),
+        )
+        summary.run_id = run_id
+
+        discovery_done = asyncio.Event()
+
+        async def _run_discovery() -> None:
+            try:
+                await _discover_all(
+                    db=db,
+                    transport=built_transport,
+                    run_id=run_id,
+                    systems=systems_to_run,
+                    current=current,
+                    hash_algo=hash_algo,
+                    limit=limit,
+                    orchestrator_cfg=transports_cfg.orchestrator,
+                    force_rescrape=force_rescrape,
+                )
+            finally:
+                discovery_done.set()
+
+        discovery_task = asyncio.create_task(_run_discovery(), name="discovery")
 
         for system in systems_to_run:
-            system_path = resolve_path(current, system)
-            files = await _list_rom_files(
-                built_transport, system_path, system.extensions,
-            )
-            if limit is not None:
-                files = files[:limit]
-            system_roms: list[Rom] = []
-            for filename in files:
-                rom = await _make_rom(
-                    built_transport,
-                    system.name,
-                    system_path,
-                    filename,
-                    hash_algo=hash_algo,
-                )
-                if skip_existing and not force_rescrape:
-                    rom_id = await db.get_rom_id_by_cache_key(rom.rom_id.cache_key)
-                    if rom_id is not None:
-                        last = await db.get_last_scrape_result(rom_id)
-                        same_hash = last is not None and last["crc32"] == rom.rom_id.crc32
-                        good_status = last is not None and last["status"] in ("OK", "PARTIAL")
-                        if good_status and same_hash:
-                            logger.info(
-                                "rom_skipped cache_key=%s reason=already_scraped",
-                                rom.rom_id.cache_key,
-                            )
-                            skipped += 1
-                            continue
-                        if last is not None and not same_hash:
-                            await db.delete_rom(rom_id)
-                            logger.info(
-                                "rom_stale cache_key=%s old_crc=%s new_crc=%s",
-                                rom.rom_id.cache_key, last["crc32"], rom.rom_id.crc32,
-                            )
-                system_roms.append(rom)
-            roms_by_system[system.name] = system_roms
-            all_roms.extend(system_roms)
-
-        summary.roms_total = len(all_roms)
-        summary.roms_skipped = skipped
-
-        if not all_roms:
-            return summary
-
-        all_run_ids: list[str] = []
-        for system_name, system_roms in roms_by_system.items():
-            if not system_roms:
-                continue
-            csv_path = csv_dir / f"scrape_{system_name}.csv"
-            with tqdm(  # type: ignore[call-arg]
-                total=len(system_roms),
-                desc=f"scraping {system_name}",
+            csv_path = csv_dir / f"scrape_{system.name}.csv"
+            with tqdm(
+                total=None,
+                desc=f"scraping {system.name}",
                 unit="rom",
                 colour="green",
                 disable=not show_progress,
@@ -318,27 +247,58 @@ async def run_scrape_skeleton(
                 orchestrator = Orchestrator(
                     registry=registry,
                     config=sources_config,
-                    db_path=str(db_path),
+                    db=db,
+                    run_id=run_id,
                     csv_path=csv_path,
                     media_root=media_root,
                     orchestrator=transports_cfg.orchestrator,
                     progress_bar=pbar,
+                    skip_existing=skip_existing,
+                    force_rescrape=force_rescrape,
                 )
-                run_id = await orchestrator.start(system_roms, [system_name])
+                try:
+                    await orchestrator.start(
+                        [system.name], discovery_done=discovery_done,
+                    )
+                except AllProvidersBlocked as exc:
+                    summary.provider_errors = dict(orchestrator.provider_errors)
+                    summary.aborted_reason = str(exc)
+                    logger.error(
+                        "run_aborted system=%s reason=%s providers=%s",
+                        system.name, exc, sorted(exc.blocked_providers),
+                    )
+                    await orchestrator.close()
+                    discovery_done.set()
+                    break
+                summary.provider_errors.update(orchestrator.provider_errors)
+                if orchestrator.aborted_reason and not summary.aborted_reason:
+                    summary.aborted_reason = orchestrator.aborted_reason
                 await orchestrator.close()
-            all_run_ids.append(run_id)
 
-        summary.run_id = all_run_ids[0] if all_run_ids else ""
+        await discovery_task
+
         total_matched = 0
         total_no_match = 0
         total_errors = 0
-        for rid in all_run_ids:
-            m, nm, e = await _count_results(db_path, rid)
+        total_skipped = 0
+        for rid in [run_id]:
+            m, nm, e, sk = await _count_results(db_path, rid)
             total_matched += m
             total_no_match += nm
             total_errors += e
+            total_skipped += sk
+        total_listed = sum(
+            await asyncio.gather(*[
+                db.count_discovered(run_id, system=system.name)
+                for system in systems_to_run
+            ]),
+        )
+        await db.truncate_discovered_roms()
+
+        summary.roms_total = total_listed
         summary.roms_matched = total_matched
         summary.roms_no_match = total_no_match
+        summary.roms_skipped = total_skipped
         summary.errors = total_errors
         return summary
     finally:
@@ -349,3 +309,49 @@ async def run_scrape_skeleton(
                 result = close()
                 if hasattr(result, "__await__"):
                     await result
+
+
+async def _discover_all(
+    *,
+    db: Database,
+    transport: LocalTransport | SshTransport,
+    run_id: str,
+    systems: list[System],
+    current: Transport,
+    hash_algo: str,
+    limit: int | None,
+    orchestrator_cfg: OrchestratorConfig,
+    force_rescrape: bool = False,
+) -> None:
+    """Run discover_system for each system sequentially (one at a time)."""
+    is_ssh = isinstance(transport, SshTransport)
+    concurrency = (
+        orchestrator_cfg.discovery_concurrency_ssh
+        if is_ssh
+        else orchestrator_cfg.discovery_concurrency_local
+    )
+    for system in systems:
+        system_path = resolve_path(current, system)
+        try:
+            stats = await discover_system(
+                db=db,
+                transport=transport,
+                run_id=run_id,
+                system=system,
+                system_path=system_path,
+                hash_algo=hash_algo,
+                concurrency=concurrency,
+                limit=limit,
+                force_rescrape=force_rescrape,
+            )
+        except Exception as exc:
+            logger.exception(
+                "discover_system_failed system=%s err=%s", system.name, exc,
+            )
+            continue
+        logger.info(
+            "discovery_summary system=%s listed=%d hashed=%d "
+            "skipped_hash=%d failed=%d",
+            system.name, stats.listed, stats.hashed,
+            stats.skipped_hash, stats.hash_failed,
+        )

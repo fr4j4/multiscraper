@@ -53,3 +53,6 @@ orchestrator:
   shutdown_drain_timeout_sec: 180
   csv_flush_every: 50
   progress_interval_sec: 0.5
+  discovery_concurrency_ssh: 8
+  discovery_concurrency_local: 32
+  discovery_poll_interval_sec: 0.5

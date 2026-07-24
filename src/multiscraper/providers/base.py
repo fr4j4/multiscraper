@@ -13,6 +13,38 @@ from pydantic import BaseModel
 from multiscraper.models import Candidate, MediaRef, MediaType, Rom
 
 
+class ProviderBlockedError(Exception):
+    """Raised by a provider when it is rate-limited or otherwise blocked.
+
+    The cascade catches this exception, marks the provider as
+    blocked for ``cooldown_after_blocked_sec`` and continues with
+    the next provider. If every media provider ends up blocked the
+    cascade raises ``AllProvidersBlocked``.
+    """
+
+    def __init__(
+        self, provider_name: str, retry_after: float | None = None,
+        reason: str = "rate_limited",
+    ) -> None:
+        self.provider_name = provider_name
+        self.retry_after = retry_after
+        self.reason = reason
+        super().__init__(
+            f"provider {provider_name!r} blocked: {reason}"
+            + (f" (retry after {retry_after}s)" if retry_after else ""),
+        )
+
+
+class AllProvidersBlocked(Exception):
+    """Raised by the cascade when every media provider is blocked."""
+
+    def __init__(self, blocked_providers: list[str]) -> None:
+        self.blocked_providers = blocked_providers
+        super().__init__(
+            f"all providers blocked: {sorted(blocked_providers)}",
+        )
+
+
 @runtime_checkable
 class Provider(Protocol):
     """Interface for every media/data provider."""

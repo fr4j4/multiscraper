@@ -47,3 +47,7 @@ class ShutdownHandler:
     def clear(self) -> None:
         self._event.clear()
         self._sigint_count = 0
+
+    def set(self) -> None:
+        """Signal workers to stop. Idempotent."""
+        self._event.set()

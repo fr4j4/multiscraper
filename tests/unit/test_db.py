@@ -170,3 +170,130 @@ async def test_get_override_by_cache_key(db: Database):
 
     missing = await db.get_override_by_cache_key("does-not-exist")
     assert missing is None
+
+
+@pytest.mark.asyncio
+async def test_discovered_roms_table_exists(db: Database):
+    """Migration 0002 should create discovered_roms."""
+    tables = await db.list_tables()
+    assert "discovered_roms" in tables
+
+
+@pytest.mark.asyncio
+async def test_truncate_discovered_roms(db: Database):
+    """truncate_discovered_roms removes all rows but keeps the table."""
+    run_id = await db.create_run(config_json={})
+    await db.insert_discovered_pending(run_id, "snes", [
+        {"rel_path": "a.smc", "raw_name": "a.smc", "normalized_name": "a",
+         "size": 0, "mtime": 0, "cache_key": ""},
+        {"rel_path": "b.smc", "raw_name": "b.smc", "normalized_name": "b",
+         "size": 0, "mtime": 0, "cache_key": ""},
+    ])
+    assert await db.count_discovered(run_id) == 2
+    await db.truncate_discovered_roms()
+    assert await db.count_discovered(run_id) == 0
+
+
+@pytest.mark.asyncio
+async def test_insert_and_find_pending(db: Database):
+    run_id = await db.create_run(config_json={})
+    await db.insert_discovered_pending(run_id, "snes", [
+        {"rel_path": "a.smc", "raw_name": "a.smc", "normalized_name": "a",
+         "size": 0, "mtime": 0, "cache_key": ""},
+    ])
+    row_id = await db.find_pending_discovered_id(run_id, "snes", "a.smc")
+    assert row_id is not None
+    assert row_id > 0
+    missing = await db.find_pending_discovered_id(run_id, "snes", "missing.smc")
+    assert missing is None
+
+
+@pytest.mark.asyncio
+async def test_update_discovered_hash_marks_done(db: Database):
+    run_id = await db.create_run(config_json={})
+    await db.insert_discovered_pending(run_id, "snes", [
+        {"rel_path": "a.smc", "raw_name": "a.smc", "normalized_name": "a",
+         "size": 0, "mtime": 0, "cache_key": ""},
+    ])
+    row_id = await db.find_pending_discovered_id(run_id, "snes", "a.smc")
+    assert row_id is not None
+    await db.update_discovered_hash(
+        row_id, size=1024, mtime=1700000000,
+        crc32="ab12cd34", sha1=None,
+        cache_key="snes:a.smc:ab12cd34", status="done",
+    )
+    pending = await db.count_discovered(run_id, hash_status="pending")
+    done = await db.count_discovered(run_id, hash_status="done")
+    assert pending == 0
+    assert done == 1
+
+
+@pytest.mark.asyncio
+async def test_claim_one_discovered(db: Database):
+    run_id = await db.create_run(config_json={})
+    await db.insert_discovered_pending(run_id, "snes", [
+        {"rel_path": "a.smc", "raw_name": "a.smc", "normalized_name": "a",
+         "size": 100, "mtime": 1, "cache_key": ""},
+        {"rel_path": "b.smc", "raw_name": "b.smc", "normalized_name": "b",
+         "size": 200, "mtime": 2, "cache_key": ""},
+    ])
+    for f in ("a.smc", "b.smc"):
+        rid = await db.find_pending_discovered_id(run_id, "snes", f)
+        assert rid is not None
+        await db.update_discovered_hash(
+            rid, size=100, mtime=1, crc32="x", sha1=None,
+            cache_key=f"snes:{f}:x", status="done",
+        )
+    claimed = await db.claim_one_discovered(run_id, "snes")
+    assert claimed is not None
+    assert claimed["hash_status"] == "claimed"
+    assert claimed["rel_path"] in ("a.smc", "b.smc")
+    claimed_again = await db.claim_one_discovered(run_id, "snes")
+    assert claimed_again is not None
+    assert claimed_again["rel_path"] != claimed["rel_path"]
+    nothing = await db.claim_one_discovered(run_id, "snes")
+    assert nothing is None
+
+
+@pytest.mark.asyncio
+async def test_release_discovered(db: Database):
+    run_id = await db.create_run(config_json={})
+    await db.insert_discovered_pending(run_id, "snes", [
+        {"rel_path": "a.smc", "raw_name": "a.smc", "normalized_name": "a",
+         "size": 0, "mtime": 0, "cache_key": ""},
+    ])
+    rid = await db.find_pending_discovered_id(run_id, "snes", "a.smc")
+    assert rid is not None
+    await db.update_discovered_hash(
+        rid, size=0, mtime=0, crc32="x", sha1=None,
+        cache_key="snes:a.smc:x", status="done",
+    )
+    claimed = await db.claim_one_discovered(run_id, "snes")
+    assert claimed is not None
+    assert claimed["hash_status"] == "claimed"
+    await db.release_discovered(int(claimed["id"]), status="done")
+    reclaim = await db.claim_one_discovered(run_id, "snes")
+    assert reclaim is not None
+    assert reclaim["id"] == claimed["id"]
+
+
+@pytest.mark.asyncio
+async def test_count_discovered_filters(db: Database):
+    run_id = await db.create_run(config_json={})
+    await db.insert_discovered_pending(run_id, "snes", [
+        {"rel_path": "a.smc", "raw_name": "a.smc", "normalized_name": "a",
+         "size": 0, "mtime": 0, "cache_key": ""},
+        {"rel_path": "b.smc", "raw_name": "b.smc", "normalized_name": "b",
+         "size": 0, "mtime": 0, "cache_key": ""},
+    ])
+    rid = await db.find_pending_discovered_id(run_id, "snes", "a.smc")
+    assert rid is not None
+    await db.update_discovered_hash(
+        rid, size=0, mtime=0, crc32="x", sha1=None,
+        cache_key="x", status="done",
+    )
+    assert await db.count_discovered(run_id) == 2
+    assert await db.count_discovered(run_id, system="snes") == 2
+    assert await db.count_discovered(run_id, system="missing") == 0
+    assert await db.count_discovered(run_id, hash_status="done") == 1
+    assert await db.count_discovered(run_id, hash_status="pending") == 1

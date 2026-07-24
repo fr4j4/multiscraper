@@ -7,6 +7,7 @@ Migrations are applied on init from db/migrations/*.sql files.
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -116,16 +117,47 @@ class Database:
         cache_key: str,
         sha1: str | None = None,
     ) -> int:
+        """Insert a rom row, or upsert / reuse an existing one.
+
+        Two paths can produce a UNIQUE collision on ``cache_key``:
+
+        - ``(system, rel_path)`` already exists with a different
+          ``cache_key`` (e.g. a re-scraped file with a new hash). The
+          ``ON CONFLICT(system, rel_path) DO UPDATE`` clause handles
+          that case.
+
+        - A *different* file in the same system has the same
+          ``cache_key`` (identical content, different ``rel_path``).
+          The first insert wins; this second one collides on the
+          ``UNIQUE(cache_key)`` constraint because ``(system,
+          rel_path)`` does not match. We treat the gemelo as
+          belonging to the same content identity and reuse the
+          existing row's id.
+        """
         assert self._conn is not None
-        await self._conn.execute(
-            "INSERT INTO roms (cache_key, system, rel_path, raw_name, normalized_name, "
-            "size, mtime, crc32, sha1) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
-            "ON CONFLICT(system, rel_path) DO UPDATE SET "
-            "cache_key=excluded.cache_key, size=excluded.size, mtime=excluded.mtime, "
-            "crc32=excluded.crc32, sha1=excluded.sha1, normalized_name=excluded.normalized_name",
-            (cache_key, system, rel_path, raw_name, normalized_name, size, mtime, crc32, sha1),
-        )
-        await self._conn.commit()
+        try:
+            await self._conn.execute(
+                "INSERT INTO roms (cache_key, system, rel_path, raw_name, "
+                "normalized_name, size, mtime, crc32, sha1) VALUES (?, ?, "
+                "?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(system, rel_path) DO UPDATE SET "
+                "cache_key=excluded.cache_key, size=excluded.size, "
+                "mtime=excluded.mtime, crc32=excluded.crc32, "
+                "sha1=excluded.sha1, normalized_name=excluded.normalized_name",
+                (cache_key, system, rel_path, raw_name, normalized_name,
+                 size, mtime, crc32, sha1),
+            )
+            await self._conn.commit()
+        except sqlite3.IntegrityError:
+            await self._conn.rollback()
+            cursor = await self._conn.execute(
+                "SELECT id FROM roms WHERE cache_key = ?", (cache_key,),
+            )
+            row = await cursor.fetchone()
+            await cursor.close()
+            if row is None:
+                raise
+            return int(row[0])
         cursor = await self._conn.execute(
             "SELECT id FROM roms WHERE cache_key = ?", (cache_key,),
         )
@@ -149,6 +181,50 @@ class Database:
             "id": row[0], "cache_key": row[1], "system": row[2], "rel_path": row[3],
             "raw_name": row[4], "normalized_name": row[5], "size": row[6],
             "mtime": row[7], "crc32": row[8], "sha1": row[9],
+        }
+
+    async def get_roms_by_paths(
+        self, system: str, rel_paths: list[str],
+    ) -> dict[str, dict[str, Any]]:
+        """Bulk lookup of roms by (system, rel_path).
+
+        Returns ``{rel_path: row}`` for each path that exists in the
+        roms table for the given system. The row includes the
+        ``last_scrape_at`` field, fetched as the most recent
+        ``scrape_results.fetched_at`` for that rom, or ``None`` if
+        the rom has never been successfully scraped.
+
+        Used by discovery to skip the per-file hash when a previously
+        scraped rom is unchanged (size + mtime + crc32 + last_scrape_at
+        all consistent).
+        """
+        assert self._conn is not None
+        if not rel_paths:
+            return {}
+        placeholders = ",".join("?" for _ in rel_paths)
+        cursor = await self._conn.execute(
+            f"SELECT r.id, r.rel_path, r.cache_key, r.size, r.mtime, "
+            f"r.crc32, r.sha1, "
+            f"(SELECT MAX(s.fetched_at) FROM scrape_results s "
+            f" WHERE s.rom_id = r.id) AS last_scrape_at "
+            f"FROM roms r "
+            f"WHERE r.system = ? AND r.rel_path IN ({placeholders})",
+            [system, *rel_paths],
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        return {
+            row[1]: {
+                "id": row[0],
+                "rel_path": row[1],
+                "cache_key": row[2],
+                "size": row[3],
+                "mtime": row[4],
+                "crc32": row[5],
+                "sha1": row[6],
+                "last_scrape_at": row[7],
+            }
+            for row in rows
         }
 
     async def get_last_scrape_result(
@@ -271,3 +347,182 @@ class Database:
              "bytes": r[4], "sha256": r[5], "url": r[6]}
             for r in rows
         ]
+
+    async def truncate_discovered_roms(self) -> None:
+        """Empty the per-run discovery table. Called at start and end of run."""
+        assert self._conn is not None
+        await self._conn.execute("DELETE FROM discovered_roms")
+        await self._conn.commit()
+
+    async def insert_discovered_pending(
+        self,
+        run_id: str,
+        system: str,
+        entries: list[dict[str, Any]],
+    ) -> None:
+        """Bulk-insert discovery entries with status 'pending'.
+
+        Each entry dict must have: rel_path, raw_name, normalized_name,
+        size, mtime. cache_key/crc32/sha1 are optional (cache_key is
+        filled in once the hash is computed).
+        """
+        assert self._conn is not None
+        if not entries:
+            return
+        now = datetime.now(tz=UTC).isoformat()
+        params = [
+            (
+                run_id, system, e["rel_path"], e["raw_name"], e["normalized_name"],
+                int(e.get("size", 0)), int(e.get("mtime", 0)),
+                e.get("crc32"), e.get("sha1"),
+                e.get("cache_key") or None, "pending", now,
+            )
+            for e in entries
+        ]
+        await self._conn.executemany(
+            "INSERT INTO discovered_roms (run_id, system, rel_path, raw_name, "
+            "normalized_name, size, mtime, crc32, sha1, cache_key, hash_status, "
+            "claimed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(run_id, rel_path) DO NOTHING",
+            params,
+        )
+        await self._conn.commit()
+
+    async def find_pending_discovered_id(
+        self,
+        run_id: str,
+        system: str,
+        rel_path: str,
+    ) -> int | None:
+        """Return the row id of a pending entry, or None."""
+        assert self._conn is not None
+        cursor = await self._conn.execute(
+            "SELECT id FROM discovered_roms "
+            "WHERE run_id = ? AND system = ? AND rel_path = ? "
+            "AND hash_status = 'pending'",
+            (run_id, system, rel_path),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        return int(row[0]) if row else None
+
+    async def update_discovered_hash(
+        self,
+        row_id: int,
+        *,
+        size: int,
+        mtime: int,
+        crc32: str | None,
+        sha1: str | None,
+        cache_key: str,
+        status: str,
+        skip_reason: str | None = None,
+    ) -> None:
+        """Set the hash/size/mtime/cache_key and transition out of 'pending'."""
+        assert self._conn is not None
+        await self._conn.execute(
+            "UPDATE discovered_roms SET size = ?, mtime = ?, crc32 = ?, "
+            "sha1 = ?, cache_key = ?, hash_status = ?, skip_reason = ? "
+            "WHERE id = ?",
+            (size, mtime, crc32, sha1, cache_key or None, status, skip_reason, row_id),
+        )
+        await self._conn.commit()
+
+    async def claim_one_discovered(
+        self,
+        run_id: str,
+        system: str,
+    ) -> dict[str, Any] | None:
+        """Atomically claim the next ready row for processing.
+
+        A row is 'ready' if its hash_status is 'done', 'skipped', or
+        'failed'. The claim flips hash_status to 'claimed' and stamps
+        claimed_at. Returns the row dict, or None if nothing is ready.
+        """
+        assert self._conn is not None
+        now = datetime.now(tz=UTC).isoformat()
+        await self._conn.execute(
+            "UPDATE discovered_roms SET hash_status = 'claimed', claimed_at = ? "
+            "WHERE id = ("
+            "  SELECT id FROM discovered_roms "
+            "  WHERE run_id = ? AND system = ? "
+            "    AND hash_status IN ('done', 'skipped', 'failed') "
+            "  ORDER BY id ASC LIMIT 1"
+            ") AND hash_status IN ('done', 'skipped', 'failed')",
+            (now, run_id, system),
+        )
+        await self._conn.commit()
+        cursor = await self._conn.execute(
+            "SELECT id, system, rel_path, raw_name, normalized_name, size, "
+            "mtime, crc32, sha1, cache_key, hash_status, skip_reason "
+            "FROM discovered_roms WHERE run_id = ? AND system = ? "
+            "AND hash_status = 'claimed' AND claimed_at = ? "
+            "ORDER BY id DESC LIMIT 1",
+            (run_id, system, now),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        if row is None:
+            return None
+        return {
+            "id": row[0], "system": row[1], "rel_path": row[2], "raw_name": row[3],
+            "normalized_name": row[4], "size": row[5], "mtime": row[6],
+            "crc32": row[7], "sha1": row[8], "cache_key": row[9],
+            "hash_status": row[10], "skip_reason": row[11],
+        }
+
+    async def release_discovered(self, row_id: int, status: str = "done") -> None:
+        """Release a claimed row. Use 'done' for retry, 'completed' for final."""
+        assert self._conn is not None
+        await self._conn.execute(
+            "UPDATE discovered_roms SET hash_status = ?, claimed_at = NULL "
+            "WHERE id = ?",
+            (status, row_id),
+        )
+        await self._conn.commit()
+
+    async def mark_completed(self, row_id: int) -> None:
+        """Mark a row as fully processed. Will never be re-claimed."""
+        assert self._conn is not None
+        await self._conn.execute(
+            "UPDATE discovered_roms SET hash_status = 'completed', "
+            "claimed_at = NULL WHERE id = ?",
+            (row_id,),
+        )
+        await self._conn.commit()
+
+    async def count_discovered(
+        self,
+        run_id: str,
+        system: str | None = None,
+        hash_status: str | None = None,
+    ) -> int:
+        """Count rows in discovered_roms with optional filters."""
+        assert self._conn is not None
+        clauses = ["run_id = ?"]
+        params: list[Any] = [run_id]
+        if system is not None:
+            clauses.append("system = ?")
+            params.append(system)
+        if hash_status is not None:
+            clauses.append("hash_status = ?")
+            params.append(hash_status)
+        cursor = await self._conn.execute(
+            f"SELECT COUNT(*) FROM discovered_roms WHERE {' AND '.join(clauses)}",
+            params,
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        return int(row[0]) if row else 0
+
+    async def has_in_progress_discovered(self, run_id: str) -> bool:
+        """Return True if there is any pending or claimed row left for run_id."""
+        assert self._conn is not None
+        cursor = await self._conn.execute(
+            "SELECT 1 FROM discovered_roms WHERE run_id = ? "
+            "AND hash_status IN ('pending', 'claimed') LIMIT 1",
+            (run_id,),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        return row is not None

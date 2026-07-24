@@ -196,8 +196,18 @@ def scrape(
     click.echo(f"  Skipped: {summary.roms_skipped}")
     click.echo(f"  No match: {summary.roms_no_match}")
     click.echo(f"  Errors: {summary.errors}")
+    if summary.provider_errors:
+        rendered = ", ".join(
+            f"{name}={count}"
+            for name, count in sorted(summary.provider_errors.items())
+        )
+        click.echo(f"  Provider errors: {rendered}")
+    if summary.aborted_reason:
+        click.echo(f"  Aborted: {summary.aborted_reason}")
     click.echo(f"  CSV dir: {summary.csv_dir}")
     click.echo(f"  DB: {summary.db_path}")
+    if summary.aborted_reason:
+        sys.exit(2)
 
 
 async def _run_scrape(

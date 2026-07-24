@@ -8,6 +8,7 @@ Supports all 10 media types.
 from __future__ import annotations
 
 import contextlib
+import logging
 from datetime import UTC, datetime
 from typing import Any, ClassVar
 
@@ -16,8 +17,17 @@ from lxml import etree
 from pydantic import HttpUrl
 
 from multiscraper.models import Candidate, MediaRef, MediaType, Rom
+from multiscraper.providers.base import ProviderBlockedError
 from multiscraper.providers.block_detect import detect_blocked
 from multiscraper.providers.match import compute_match_score
+
+logger = logging.getLogger(__name__)
+
+# HTTP status codes that indicate the provider has rate-limited us or
+# is otherwise blocked for the current run. 429 = RFC 6585 too many
+# requests; 430 = ScreenScraper-specific "quota exceeded for today";
+# 503 = service unavailable.
+_BLOCKED_STATUSES: frozenset[int] = frozenset({429, 430, 503})
 
 _API_BASE = "https://www.screenscraper.fr/api2"
 
@@ -120,11 +130,37 @@ class ScreenScraperProvider:
         async with self._session.get(url, params=params) as resp:
             body = await resp.read()
             if self.detect_blocked(resp, body):
-                return []
+                logger.warning(
+                    "screenscraper_blocked rom=%s status=%d body_head=%s",
+                    rom.raw_name, resp.status,
+                    body[:200].decode("utf-8", "replace"),
+                )
+                raise ProviderBlockedError(
+                    self.name, reason="cloudflare_or_captcha",
+                )
+            if resp.status in _BLOCKED_STATUSES:
+                logger.warning(
+                    "screenscraper_http_error rom=%s status=%d body_head=%s",
+                    rom.raw_name, resp.status,
+                    body[:500].decode("utf-8", "replace"),
+                )
+                raise ProviderBlockedError(
+                    self.name, reason=f"http_{resp.status}",
+                )
             if resp.status != 200:
+                logger.warning(
+                    "screenscraper_http_error rom=%s status=%d body_head=%s",
+                    rom.raw_name, resp.status,
+                    body[:500].decode("utf-8", "replace"),
+                )
                 return []
-
-        return self._parse_xml(body, rom)
+            candidates = self._parse_xml(body, rom)
+            if not candidates:
+                logger.info(
+                    "screenscraper_no_match rom=%s crc=%s",
+                    rom.raw_name, rom.rom_id.crc32 or "",
+                )
+            return candidates
 
     def _parse_xml(self, body: bytes, rom: Rom) -> list[Candidate]:
         """Parse ScreenScraper XML response into Candidates."""
