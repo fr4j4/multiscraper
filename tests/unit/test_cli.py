@@ -80,8 +80,47 @@ def test_cli_scrape_dry_run(tmp_path):
         "--roms-root", str(tmp_path),
         "--config", "nonexistent.yaml",
     ])
-    # Should fail gracefully (no config found)
-    assert result.exit_code != 0
+    # Dry-run must not require the config to exist; it just prints settings.
+    assert result.exit_code == 0
+    assert "Dry run" in result.output
+
+
+def test_cli_scrape_resolves_hash_auto(tmp_path, monkeypatch):
+    """--hash auto must be resolved to crc32 before calling _make_rom.
+
+    Regression: the SSH transport's hash() only takes 'crc32' or 'sha1',
+    so passing 'auto' would silently fall through to sha1.
+    """
+    from multiscraper import scrape as scrape_mod
+
+    # Set up minimal config dir
+    cfg_dir = tmp_path / "config"
+    cfg_dir.mkdir()
+    (cfg_dir / "config.yaml").write_text("transports: []\n", encoding="utf-8")
+    (cfg_dir / "sources.yaml").write_text(
+        "providers: []\nprovider_defaults: {}\n", encoding="utf-8",
+    )
+    (cfg_dir / "systems.yaml").write_text("systems: []\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    seen: dict[str, str] = {}
+
+    async def fake_run_scrape_skeleton(**kwargs):
+        seen["hash_algo"] = kwargs["hash_algo"]
+        return scrape_mod.SkeletonSummary()
+
+    runner = CliRunner()
+    with patch("multiscraper.scrape.run_scrape_skeleton", fake_run_scrape_skeleton):
+        result = runner.invoke(main, [
+            "scrape",
+            "--config-dir", str(cfg_dir),
+            "--systems", "gba",
+        ])
+
+    assert result.exit_code == 0, f"cli failed: {result.output}"
+    assert seen.get("hash_algo") == "crc32", (
+        f"expected hash_algo resolved to 'crc32', got {seen.get('hash_algo')!r}"
+    )
 
 
 def _make_report(*results: CheckResult) -> DoctorReport:

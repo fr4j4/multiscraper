@@ -62,13 +62,15 @@ class SshTransport:
 
     async def list_dir(self, path: str) -> list[str]:
         conn = await self._ensure_connected()
-        result = await conn.run(f"ls -1 {path}", check=True)
+        result = await conn.run(f"ls -1 {shlex.quote(path)}", check=True)
         out = cast(str, result.stdout)
         return [line.strip() for line in out.splitlines() if line.strip()]
 
     async def file_info(self, path: str) -> FileInfo:
         conn = await self._ensure_connected()
-        result = await conn.run(f"stat -c '%s %Y' {path}", check=True)
+        result = await conn.run(
+            f"stat -c '%s %Y' {shlex.quote(path)}", check=True,
+        )
         out = cast(str, result.stdout)
         size_str, mtime_str = out.strip().split()
         return FileInfo(
@@ -79,31 +81,47 @@ class SshTransport:
         )
 
     async def hash(self, path: str, algo: Literal["crc32", "sha1"]) -> str:
+        import zlib
+
+        if algo == "crc32":
+            # `crc32` is not always installed on minimal systems. Stream the
+            # file and compute the CRC32 in Python via zlib.
+            crc = 0
+            async for chunk in self.open_read(path):
+                crc = zlib.crc32(chunk, crc)
+            return f"{crc & 0xFFFFFFFF:08x}"
         conn = await self._ensure_connected()
-        cmd = f"crc32 {path}" if algo == "crc32" else f"sha1sum {path} | cut -d' ' -f1"
+        cmd = f"sha1sum {shlex.quote(path)} | cut -d' ' -f1"
         result = await conn.run(cmd, check=True)
         out = cast(str, result.stdout)
         return out.strip().lower()
 
     async def open_read(self, path: str, max_bytes: int | None = None) -> AsyncIterator[bytes]:
+        """Stream-read a file as raw bytes via SFTP.
+
+        SFTP handles binary data correctly, unlike `cat` over a text
+        session which decodes the output as UTF-8.
+        """
         conn = await self._ensure_connected()
-        proc = await conn.create_process(f"cat {path}")
-        reader: asyncssh.SSHReader[str] = proc.stdout
-        remaining = max_bytes
-        try:
+        async with conn.start_sftp_client() as sftp, sftp.open(path, "rb") as f:
+            remaining = max_bytes
             while True:
-                chunk_size = min(64 * 1024, remaining) if remaining else 64 * 1024
-                chunk = await reader.read(chunk_size)
+                chunk_size = 64 * 1024
+                if remaining is not None:
+                    chunk_size = min(chunk_size, remaining)
+                chunk = await f.read(chunk_size)
                 if not chunk:
                     break
-                yield chunk.encode("utf-8") if isinstance(chunk, str) else chunk
+                chunk_bytes: bytes = (
+                    chunk.encode("utf-8")
+                    if isinstance(chunk, str)
+                    else chunk
+                )
+                yield chunk_bytes
                 if remaining is not None:
-                    remaining -= len(chunk)
+                    remaining -= len(chunk_bytes)
                     if remaining <= 0:
                         break
-        finally:
-            proc.close()
-            await proc.wait_closed()
 
     async def path_exists(self, path: str) -> bool:
         """Return True if path exists and is a directory on the remote host."""

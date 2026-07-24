@@ -13,6 +13,7 @@ from multiscraper.models import (
     Candidate,
     GameMetadata,
     IdentifyMethod,
+    MediaFile,
     MediaRef,
     MediaType,
     Rom,
@@ -57,7 +58,9 @@ class CascadeResult:
             self.match_score = None
             self.metadata = None
 
-    def to_scraped_result(self) -> ScrapedResult:
+    def to_scraped_result(
+        self, media_files: list[MediaFile] | None = None,
+    ) -> ScrapedResult:
         return ScrapedResult(
             rom=self.rom,
             status=self.status,
@@ -65,6 +68,7 @@ class CascadeResult:
             chosen_provider=self.chosen_provider,
             match_score=self.match_score,
             metadata=self.metadata,
+            media=media_files if media_files is not None else [],
             fetched_at=self.fetched_at,
         )
 

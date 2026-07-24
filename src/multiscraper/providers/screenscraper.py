@@ -59,7 +59,7 @@ class ScreenScraperProvider:
 
     name: ClassVar[str] = "screenscraper"
     requires_auth: ClassVar[bool] = False
-    auth_fields: ClassVar[list[str]] = ["devid", "devpassword"]
+    auth_fields: ClassVar[list[str]] = ["devid", "devpassword", "ssid", "sspassword"]
     rate_limit_per_sec: ClassVar[float] = 2.0
     priority: ClassVar[int] = 5
     supported_media: ClassVar[set[MediaType]] = {
@@ -75,6 +75,8 @@ class ScreenScraperProvider:
     def __init__(self) -> None:
         self._devid: str = ""
         self._devpassword: str = ""
+        self._ssid: str = ""
+        self._sspassword: str = ""
         self._region_priority: list[str] = ["wor", "us", "eu", "jp"]
         self._language_priority: list[str] = ["en"]
         self._session: aiohttp.ClientSession | None = None
@@ -82,6 +84,8 @@ class ScreenScraperProvider:
     async def setup(self, config: dict[str, Any]) -> None:
         self._devid = str(config.get("devid", ""))
         self._devpassword = str(config.get("devpassword", ""))
+        self._ssid = str(config.get("ssid", ""))
+        self._sspassword = str(config.get("sspassword", ""))
         self._region_priority = list(config.get("region_priority", ["wor", "us", "eu", "jp"]))
         self._language_priority = list(config.get("language_priority", ["en"]))
         self._session = aiohttp.ClientSession()
@@ -106,6 +110,9 @@ class ScreenScraperProvider:
             "romnom": rom.raw_name,
             "systemeid": str(system_id),
         }
+        if self._ssid:
+            params["ssid"] = self._ssid
+            params["sspassword"] = self._sspassword
         if rom.rom_id.crc32:
             params["crc"] = rom.rom_id.crc32
 

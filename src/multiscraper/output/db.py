@@ -117,17 +117,22 @@ class Database:
         sha1: str | None = None,
     ) -> int:
         assert self._conn is not None
-        cursor = await self._conn.execute(
+        await self._conn.execute(
             "INSERT INTO roms (cache_key, system, rel_path, raw_name, normalized_name, "
             "size, mtime, crc32, sha1) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
-            "ON CONFLICT(cache_key) DO UPDATE SET crc32=excluded.crc32, sha1=excluded.sha1",
+            "ON CONFLICT(system, rel_path) DO UPDATE SET "
+            "cache_key=excluded.cache_key, size=excluded.size, mtime=excluded.mtime, "
+            "crc32=excluded.crc32, sha1=excluded.sha1, normalized_name=excluded.normalized_name",
             (cache_key, system, rel_path, raw_name, normalized_name, size, mtime, crc32, sha1),
         )
         await self._conn.commit()
-        rom_id = cursor.lastrowid
+        cursor = await self._conn.execute(
+            "SELECT id FROM roms WHERE cache_key = ?", (cache_key,),
+        )
+        row = await cursor.fetchone()
         await cursor.close()
-        assert rom_id is not None
-        return rom_id
+        assert row is not None, f"rom not found after upsert: {cache_key}"
+        return int(row[0])
 
     async def get_rom_by_cache_key(self, cache_key: str) -> dict[str, Any] | None:
         assert self._conn is not None
@@ -145,6 +150,47 @@ class Database:
             "raw_name": row[4], "normalized_name": row[5], "size": row[6],
             "mtime": row[7], "crc32": row[8], "sha1": row[9],
         }
+
+    async def get_last_scrape_result(
+        self, rom_id: int,
+    ) -> dict[str, Any] | None:
+        """Return the most recent scrape result for a ROM, or None."""
+        assert self._conn is not None
+        cursor = await self._conn.execute(
+            "SELECT s.status, s.chosen_provider, s.match_score, s.fetched_at, r.crc32, r.sha1 "
+            "FROM scrape_results s JOIN roms r ON s.rom_id = r.id "
+            "WHERE s.rom_id = ? "
+            "ORDER BY s.fetched_at DESC LIMIT 1",
+            (rom_id,),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        if row is None:
+            return None
+        return {
+            "status": row[0],
+            "chosen_provider": row[1],
+            "match_score": row[2],
+            "fetched_at": row[3],
+            "crc32": row[4],
+            "sha1": row[5],
+        }
+
+    async def get_rom_id_by_cache_key(self, cache_key: str) -> int | None:
+        """Return the rom id for a cache_key, or None."""
+        assert self._conn is not None
+        cursor = await self._conn.execute(
+            "SELECT id FROM roms WHERE cache_key = ?", (cache_key,),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        return int(row[0]) if row else None
+
+    async def delete_rom(self, rom_id: int) -> None:
+        """Delete a ROM and all its scrape results."""
+        assert self._conn is not None
+        await self._conn.execute("DELETE FROM roms WHERE id = ?", (rom_id,))
+        await self._conn.commit()
 
     async def insert_scrape_result(self, run_id: str, rom_id: int, result: ScrapedResult) -> None:
         assert self._conn is not None

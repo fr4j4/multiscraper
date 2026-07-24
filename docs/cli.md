@@ -36,11 +36,12 @@ multiscraper scrape [OPTIONS]
 | `--media-root` | path | `None` | Output directory for downloaded media. Falls back to `systems.yaml::media_root`, then `$HOME/multiscraper_data/media/`. |
 | `--es-systems` | path | `None` | Explicit path to `es_systems.cfg`. Auto-discovered otherwise. |
 | `--config` | path | `config/sources.yaml` | Path to `sources.yaml`. |
+| `--config-dir` | path | `config` | Directory containing `config.yaml`, `sources.yaml`, `systems.yaml`. |
 | `--systems` | csv | `None` | Restrict to a comma-separated list of system names. |
-| `--exclude-systems` | csv | `None` | Comma-separated list of systems to skip. |
+| `--limit` | int | `None` | Maximum number of ROMs per system to scrape. Useful for smoke tests. |
 | `--workers` | int | `8` | Number of concurrent worker tasks. Mirrors `orchestrator.workers` in `sources.yaml`. |
 | `--batch-size` | int | `50` | ROMs per batch. Mirrors `orchestrator.batch_size`. |
-| `--match-threshold` | float | `0.7` | Minimum `match_score` to accept a candidate. Mirrors `provider_defaults.match_threshold`. |
+| `--match-threshold` | float | `0.7` | Minimum `match_score` to accept a candidate. Overrides `provider_defaults.match_threshold` from YAML. |
 | `--hash` | `crc32` \| `sha1` \| `auto` | `auto` | Hash algorithm. `auto` is CRC32 with SHA1 fallback on collision. |
 | `--region` | csv | `wor,us,eu,jp` | Region preference order. |
 | `--language` | csv | `en` | Default language preference. |
@@ -59,12 +60,23 @@ multiscraper scrape [OPTIONS]
 | `--ssh-jump` | str | `None` | ProxyJump host. |
 | `--auto-trust` | flag | `false` | Skip strict `known_hosts` check (spec decisión #15). |
 | `-v`, `--verbose` | count | `0` | `-v` is DEBUG for `multiscraper.*`; `-vv` also raises library loggers to INFO. |
-| `-q`, `--quiet` | flag | `false` | Set `multiscraper.*` to WARNING. |
+| `-q`, `--quiet` | flag | `false` | Set `multiscraper.*` to `WARNING`. |
 | `--log-file` | path | `None` | Write JSONL log to this path in addition to the terminal. |
 | `--csv` | path | `None` | CSV output path. |
 | `--emit` | `es` \| `json` \| `both` | `both` | What to emit at the end of the run. |
-| `--dry-run` | flag | `false` | Print a plan and exit without touching disk. |
+| `--dry-run` | flag | `false` | Print a plan and exit without touching disk. Validates the config only if no other early-exit triggers. |
+| `--no-cache` | flag | `false` | Skip DB cache lookups (always re-scrape). |
 | `--no-language-columns` | flag | `false` | Skip the `*_language` and `*_source` columns in the CSV. |
+
+### Default values from YAML
+
+The CLI only overrides `provider_defaults.match_threshold` (via
+`--match-threshold`). The rest of `provider_defaults` — `timeout_sec`,
+`rate_limit_per_sec`, `burst`, `cooldown_after_blocked_sec`,
+`max_consecutive_failures`, `max_candidates_per_provider` — is loaded
+from `sources.yaml` untouched. This means the YAML is the single
+source of truth for those tunables. To override them for a single
+run, edit the YAML (or use a separate file passed via `--config`).
 
 ### Examples
 

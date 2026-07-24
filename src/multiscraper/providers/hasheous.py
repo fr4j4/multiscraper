@@ -24,6 +24,7 @@ class HasheousIdentifier:
     """
 
     name: ClassVar[str] = "hasheous"
+    priority: ClassVar[int] = 7
     is_identifier_only: ClassVar[bool] = True
     health_url: ClassVar[str | None] = "https://hasheous.org/"
 

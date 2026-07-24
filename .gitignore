@@ -7,6 +7,7 @@ dist/
 .cache/
 .multiscraper_data/
 reports/
+media/
 .venv/
 venv/
 *.db
@@ -20,3 +21,4 @@ htmlcov/
 config/sources.yaml
 config/systems.yaml
 config/config.yaml
+.env
